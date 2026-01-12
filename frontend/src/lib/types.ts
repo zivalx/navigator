@@ -1,0 +1,148 @@
+export type AssetType = 'stock' | 'etf' | 'crypto' | 'fund' | 'other';
+export type MarketRegion = 'US' | 'EU' | 'ASIA';
+export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF';
+
+export interface Asset {
+  id: string;
+  symbol: string;
+  name: string;
+  exchange?: string;
+  currency: Currency;
+  assetType: AssetType;
+  marketRegion: MarketRegion;
+  providerIds?: Record<string, string>;
+}
+
+export interface HoldingLot {
+  id: string;
+  assetId: string;
+  quantity: number;
+  avgCost: number;
+  costCurrency: Currency;
+  accountName: string;
+  tags?: string[];
+  purchaseDate: Date;
+  createdAt: Date;
+}
+
+export interface CashBalance {
+  id: string;
+  currency: Currency;
+  amount: number;
+  accountName: string;
+}
+
+export interface WatchlistItem {
+  id: string;
+  watchlistId: string;
+  assetId: string;
+  notes?: string;
+  targetPrice?: number;
+  createdAt: Date;
+}
+
+export interface Watchlist {
+  id: string;
+  name: string;
+  createdAt: Date;
+}
+
+export interface PriceSnapshot {
+  id: string;
+  assetId: string;
+  price: number;
+  currency: Currency;
+  timestamp: Date;
+  source: string;
+}
+
+export interface NewsItem {
+  id: string;
+  assetId?: string;
+  title: string;
+  summary: string;
+  url: string;
+  publisher: string;
+  publishedAt: Date;
+  sentimentScore: number; // -1 to 1
+  relevanceScore: number; // 0 to 1
+}
+
+export interface PortfolioSnapshot {
+  timestamp: Date;
+  navBaseCurrency: Currency;
+  navValue: number;
+  dailyPnL: number;
+  dailyPnLPercent: number;
+}
+
+export interface FxRate {
+  id: string;
+  baseCurrency: Currency;
+  quoteCurrency: Currency;
+  rate: number;
+  timestamp: Date;
+}
+
+// Computed types for UI
+export interface HoldingWithAsset extends HoldingLot {
+  asset: Asset;
+  currentPrice?: number;
+  priceChange?: number;
+  priceChangePercent?: number;
+  marketValue?: number;
+  unrealizedPnL?: number;
+  unrealizedPnLPercent?: number;
+  weight?: number;
+}
+
+// Grouped holdings by asset for display
+export interface GroupedHolding {
+  assetId: string;
+  asset: Asset;
+  lots: HoldingWithAsset[];
+  totalQuantity: number;
+  avgCost: number;
+  currentPrice?: number;
+  priceChange?: number;
+  priceChangePercent?: number;
+  marketValue?: number;
+  unrealizedPnL?: number;
+  unrealizedPnLPercent?: number;
+  weight?: number;
+}
+
+export interface WatchlistItemWithAsset extends WatchlistItem {
+  asset: Asset;
+  currentPrice?: number;
+  priceChange?: number;
+  priceChangePercent?: number;
+}
+
+export interface PortfolioSummary {
+  totalNav: number;
+  baseCurrency: Currency;
+  dailyPnL: number;
+  dailyPnLPercent: number;
+  weeklyPnLPercent?: number;
+  monthlyPnLPercent?: number;
+  totalCost: number;
+  totalUnrealizedPnL: number;
+  totalUnrealizedPnLPercent: number;
+  lastUpdated: Date;
+}
+
+export interface MarketMover {
+  asset: Asset;
+  price: number;
+  change: number;
+  changePercent: number;
+}
+
+export interface Alert {
+  id: string;
+  type: 'missing_price' | 'unmapped_symbol' | 'fx_missing' | 'api_error';
+  message: string;
+  assetId?: string;
+  timestamp: Date;
+}

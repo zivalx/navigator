@@ -1,0 +1,48 @@
+# FastAPI and server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# Redis cache
+redis==5.2.1
+hiredis==3.0.0
+
+# Pydantic
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# HTTP client
+httpx==0.28.1
+aiohttp==3.11.11
+
+# Rate limiting
+slowapi==0.1.9
+
+# Background tasks
+apscheduler==3.10.4
+
+# Authentication (optional, for later)
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+
+# AI/LLM
+anthropic==0.42.0
+openai==1.59.5
+
+# Data processing
+pandas==2.2.3
+numpy==2.2.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx==0.28.1
+
+# CORS
+python-cors==1.0.0

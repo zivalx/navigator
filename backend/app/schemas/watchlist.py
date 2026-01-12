@@ -1,0 +1,60 @@
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+from .asset import Asset
+
+
+class WatchlistBase(BaseModel):
+    name: str
+
+    class Config:
+        populate_by_name = True
+
+
+class WatchlistCreate(WatchlistBase):
+    pass
+
+
+class Watchlist(WatchlistBase):
+    id: str
+    created_at: datetime = Field(alias="createdAt")
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+
+class WatchlistItemBase(BaseModel):
+    watchlist_id: str = Field(alias="watchlistId")
+    asset_id: str = Field(alias="assetId")
+    notes: Optional[str] = None
+    target_price: Optional[float] = Field(default=None, alias="targetPrice")
+
+    class Config:
+        populate_by_name = True
+
+
+class WatchlistItemCreate(WatchlistItemBase):
+    pass
+
+
+class WatchlistItem(WatchlistItemBase):
+    id: str
+    created_at: datetime = Field(alias="createdAt")
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+
+class WatchlistItemWithAsset(WatchlistItem):
+    """Watchlist item with populated asset and current price."""
+    asset: Asset
+    current_price: Optional[float] = Field(default=None, alias="currentPrice")
+    price_change: Optional[float] = Field(default=None, alias="priceChange")
+    price_change_percent: Optional[float] = Field(default=None, alias="priceChangePercent")
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+        use_enum_values = True
