@@ -41,6 +41,11 @@ async def create_holding(
     db: Session = Depends(get_db)
 ):
     """Add a new holding lot."""
+    if holding_in.quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+    if holding_in.avg_cost < 0:
+        raise HTTPException(status_code=400, detail="Average cost cannot be negative")
+
     # Verify asset exists
     asset = db.query(Asset).filter(Asset.id == holding_in.asset_id).first()
     if not asset:
@@ -57,6 +62,38 @@ async def create_holding(
         purchase_date=holding_in.purchase_date,
     )
     db.add(holding)
+    db.commit()
+    db.refresh(holding)
+    return holding
+
+
+@router.put("/holdings/{holding_id}", response_model=schemas.HoldingLot)
+async def update_holding(
+    holding_id: str,
+    holding_in: schemas.HoldingLotUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update a holding lot (quantity, cost, date, account, tags)."""
+    holding = db.query(models.HoldingLot).filter(
+        models.HoldingLot.id == holding_id
+    ).first()
+    if not holding:
+        raise HTTPException(status_code=404, detail="Holding not found")
+
+    update_data = holding_in.model_dump(exclude_unset=True)
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    if "quantity" in update_data and update_data["quantity"] <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+
+    if "avg_cost" in update_data and update_data["avg_cost"] < 0:
+        raise HTTPException(status_code=400, detail="Average cost cannot be negative")
+
+    for field, value in update_data.items():
+        setattr(holding, field, value)
+
     db.commit()
     db.refresh(holding)
     return holding
@@ -89,6 +126,9 @@ async def create_cash_balance(
     db: Session = Depends(get_db)
 ):
     """Add or update cash balance."""
+    if balance_in.amount < 0:
+        raise HTTPException(status_code=400, detail="Amount cannot be negative")
+
     balance = models.CashBalance(
         id=str(uuid.uuid4()),
         currency=balance_in.currency,

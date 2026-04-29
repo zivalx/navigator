@@ -1,21 +1,20 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  Briefcase, 
-  Star, 
-  TrendingUp, 
+import {
+  LayoutDashboard,
+  Briefcase,
+  Star,
+  TrendingUp,
   Grid3X3,
   Settings,
-  Search,
   Moon,
   Sun,
   RefreshCw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { useTheme } from '@/contexts/ThemeContext';
 import { usePortfolio } from '@/contexts/PortfolioContext';
+import { GlobalSearch } from '@/components/common/GlobalSearch';
 import { cn } from '@/lib/utils';
 import {
   Sidebar,
@@ -88,7 +87,6 @@ function AppSidebar() {
 function TopBar() {
   const { theme, toggleTheme } = useTheme();
   const { refreshPrices, lastUpdated, isDemoMode } = usePortfolio();
-  const [searchQuery, setSearchQuery] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleRefresh = async () => {
@@ -121,16 +119,7 @@ function TopBar() {
       <div className="flex-1" />
       
       {/* Search */}
-      <div className="relative hidden md:block">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          type="text"
-          placeholder="Search assets..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-64 pl-9 bg-muted/50 border-border"
-        />
-      </div>
+      <GlobalSearch />
 
       {/* Last Updated & Refresh */}
       <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">

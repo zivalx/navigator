@@ -92,26 +92,26 @@ class PortfolioService:
         # Group by asset_id
         grouped = {}
         for holding in holdings_with_prices:
-            asset_id = holding.assetId
-            if asset_id not in grouped:
-                grouped[asset_id] = {
-                    "assetId": asset_id,
+            aid = holding.asset_id
+            if aid not in grouped:
+                grouped[aid] = {
+                    "assetId": aid,
                     "asset": holding.asset,
                     "lots": [],
                     "totalQuantity": 0,
                     "totalCost": 0,
                 }
 
-            grouped[asset_id]["lots"].append(holding)
-            grouped[asset_id]["totalQuantity"] += holding.quantity
+            grouped[aid]["lots"].append(holding)
+            grouped[aid]["totalQuantity"] += holding.quantity
 
             # Convert cost to base currency for weighted average
             cost_base = await self.fx_service.convert(
-                holding.avgCost,
-                holding.costCurrency,
+                holding.avg_cost,
+                Currency(holding.cost_currency),
                 self.base_currency
             )
-            grouped[asset_id]["totalCost"] += cost_base * holding.quantity
+            grouped[aid]["totalCost"] += cost_base * holding.quantity
 
         # Calculate weighted averages and totals
         result = []
@@ -121,9 +121,9 @@ class PortfolioService:
 
             # Use first lot's current price (they should all be the same)
             first_lot = group["lots"][0]
-            current_price = first_lot.currentPrice if hasattr(first_lot, 'currentPrice') else None
-            price_change = first_lot.priceChange if hasattr(first_lot, 'priceChange') else None
-            price_change_percent = first_lot.priceChangePercent if hasattr(first_lot, 'priceChangePercent') else None
+            current_price = first_lot.current_price
+            price_change = first_lot.price_change
+            price_change_percent = first_lot.price_change_percent
 
             market_value = None
             unrealized_pnl = None
@@ -159,9 +159,9 @@ class PortfolioService:
         total_cost = 0
 
         for holding in grouped:
-            if holding.marketValue:
-                total_nav += holding.marketValue
-            total_cost += holding.avgCost * holding.totalQuantity
+            if holding.market_value:
+                total_nav += holding.market_value
+            total_cost += holding.avg_cost * holding.total_quantity
 
         total_unrealized_pnl = total_nav - total_cost
         total_unrealized_pnl_percent = (total_unrealized_pnl / total_cost * 100) if total_cost else 0

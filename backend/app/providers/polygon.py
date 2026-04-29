@@ -95,3 +95,34 @@ class PolygonProvider(BaseProvider):
             }
 
         raise ValueError(f"No snapshot data for {symbol}")
+
+    async def get_movers(self, direction: str = "gainers", limit: int = 10) -> List[Dict]:
+        """Get top gainers or losers from Polygon snapshot."""
+        if not self.api_key:
+            raise ValueError("Polygon API key not configured")
+
+        url = f"{self.BASE_URL}/v2/snapshot/locale/us/markets/stocks/{direction}"
+        params = {"apiKey": self.api_key}
+
+        response = await self.client.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        results = []
+        for ticker in data.get("tickers", [])[:limit]:
+            day = ticker.get("day", {})
+            prev = ticker.get("prevDay", {})
+            price = day.get("c", 0)
+            prev_close = prev.get("c", 0)
+            change = price - prev_close if prev_close else 0
+            change_pct = (change / prev_close * 100) if prev_close else 0
+            results.append({
+                "symbol": ticker.get("ticker", ""),
+                "name": "",
+                "price": round(price, 2),
+                "change": round(change, 2),
+                "changePercent": round(change_pct, 2),
+                "volume": day.get("v", 0),
+                "source": "polygon",
+            })
+        return results

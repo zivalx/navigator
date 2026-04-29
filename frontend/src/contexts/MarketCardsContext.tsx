@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef } from 'react';
 import { MarketCard, MarketCardData, DataSource, defaultMarketCards } from '@/lib/marketCardTypes';
+import { api } from '@/lib/api';
 
 interface MarketCardsContextType {
   cards: MarketCardData[];
@@ -14,47 +15,63 @@ interface MarketCardsContextType {
 
 const MarketCardsContext = createContext<MarketCardsContextType | undefined>(undefined);
 
-// Mock price data for demo mode
-const generateMockPrice = (symbol: string) => {
-  const basePrices: Record<string, number> = {
-    SPY: 478.23, QQQ: 405.67, DIA: 378.45, AAPL: 189.45, MSFT: 378.91,
-    GOOGL: 141.23, NVDA: 495.22, TSLA: 248.50, AMZN: 178.35, META: 356.78,
-    BTC: 43567.89, ETH: 2345.67, VTI: 245.67, VOO: 438.90, IWM: 198.45,
-  };
-  const basePrice = basePrices[symbol] || 100 + Math.random() * 200;
-  const change = (Math.random() - 0.5) * 10;
-  const changePercent = (change / basePrice) * 100;
-  
-  return {
-    price: basePrice + change,
-    change,
-    changePercent,
-    currency: 'USD',
-    lastUpdated: new Date(),
-  };
-};
-
 export function MarketCardsProvider({ children }: { children: ReactNode }) {
   const [cards, setCards] = useState<MarketCard[]>(() => {
     const saved = localStorage.getItem('marketCards');
     return saved ? JSON.parse(saved) : defaultMarketCards;
   });
+  const [prices, setPrices] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string }>>({});
   const [isEditMode, setEditMode] = useState(false);
+  const fetchingRef = useRef(false);
 
   // Save to localStorage
   useEffect(() => {
     localStorage.setItem('marketCards', JSON.stringify(cards));
   }, [cards]);
 
-  // Cards with price data
+  // Fetch real prices for all card symbols
+  const fetchPrices = useCallback(async () => {
+    if (fetchingRef.current || cards.length === 0) return;
+    fetchingRef.current = true;
+    try {
+      const symbols = [...new Set(cards.map(c => c.symbol))];
+      const quotes = await api.getQuotes(symbols);
+      const newPrices: typeof prices = {};
+      for (const [symbol, data] of Object.entries(quotes)) {
+        if (data && typeof data === 'object' && 'price' in data) {
+          newPrices[symbol] = {
+            price: data.price,
+            change: data.change ?? 0,
+            changePercent: data.changePercent ?? 0,
+            currency: data.currency ?? 'USD',
+          };
+        }
+      }
+      setPrices(newPrices);
+    } catch (err) {
+      // Silently fail — cards will show without prices
+    } finally {
+      fetchingRef.current = false;
+    }
+  }, [cards]);
+
+  // Fetch on mount and every 60s
+  useEffect(() => {
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 60000);
+    return () => clearInterval(interval);
+  }, [fetchPrices]);
+
+  // Cards with real price data
   const cardsWithData: MarketCardData[] = cards
     .sort((a, b) => a.order - b.order)
     .map(card => ({
       ...card,
-      ...generateMockPrice(card.symbol),
+      ...(prices[card.symbol] ?? {}),
+      lastUpdated: new Date(),
     }));
 
-  const addCard = useCallback((symbol: string, name: string, dataSource: DataSource = 'demo', region?: 'US' | 'EU' | 'ASIA') => {
+  const addCard = useCallback((symbol: string, name: string, dataSource: DataSource = 'yahoo', region?: 'US' | 'EU' | 'ASIA') => {
     const newCard: MarketCard = {
       id: `card_${Date.now()}`,
       symbol: symbol.toUpperCase(),

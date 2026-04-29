@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -8,19 +8,32 @@ from ..services.market_data import MarketDataService
 router = APIRouter()
 
 
+@router.get("/search")
+async def search_assets(q: str, limit: int = 10, db: Session = Depends(get_db)):
+    """Search for assets by name or ticker symbol (powered by Yahoo Finance)."""
+    market_service = MarketDataService(db)
+    results = await market_service.search_assets(q, limit=limit)
+    return results
+
+
 @router.get("/quote/{symbol}")
 async def get_quote(symbol: str, db: Session = Depends(get_db)):
     """Get real-time quote for a symbol."""
     market_service = MarketDataService(db)
-    quote = await market_service.get_quote(symbol)
+    try:
+        quote = await market_service.get_quote(symbol)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return quote
 
 
 @router.get("/quotes")
 async def get_quotes(symbols: str, db: Session = Depends(get_db)):
     """Get quotes for multiple symbols (comma-separated)."""
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        raise HTTPException(status_code=400, detail="No symbols provided")
     market_service = MarketDataService(db)
-    symbol_list = [s.strip().upper() for s in symbols.split(",")]
     quotes = await market_service.get_quotes(symbol_list)
     return quotes
 

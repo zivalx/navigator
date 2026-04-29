@@ -1,5 +1,6 @@
 import { usePortfolio } from '@/contexts/PortfolioContext';
 import { ExternalLink, TrendingUp, TrendingDown } from 'lucide-react';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -20,7 +21,10 @@ export function NewsDigestCard() {
 
   return (
     <div className="rounded-xl border border-border bg-card p-5">
-      <h3 className="text-lg font-semibold mb-4">What Changed Today</h3>
+      <h3 className="text-lg font-semibold mb-4">
+        What Changed Today
+        <InfoTooltip text="Latest financial news with AI sentiment scoring. Green = positive, red = negative sentiment." />
+      </h3>
       <div className="space-y-3">
         {news.slice(0, 5).map((item) => (
           <a

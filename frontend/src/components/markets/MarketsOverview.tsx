@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -25,6 +25,18 @@ export function MarketsOverview() {
       card.name.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesRegion && matchesSearch;
   });
+
+  // Compute real gainers/losers from market cards with prices
+  const { gainers, losers } = useMemo(() => {
+    const withChange = cards
+      .filter(c => c.changePercent !== undefined && c.price !== undefined)
+      .map(c => ({ symbol: c.symbol, name: c.name, price: c.price!, change: c.changePercent! }));
+    const sorted = [...withChange].sort((a, b) => b.change - a.change);
+    return {
+      gainers: sorted.filter(s => s.change > 0).slice(0, 5),
+      losers: sorted.filter(s => s.change < 0).reverse().slice(0, 5),
+    };
+  }, [cards]);
 
   const handleResetCards = () => {
     localStorage.setItem('marketCards', JSON.stringify(defaultMarketCards));
@@ -122,14 +134,8 @@ export function MarketsOverview() {
             Top Gainers
           </h3>
           <div className="space-y-2">
-            {[
-              { symbol: 'NVDA', name: 'NVIDIA', price: 138.72, change: 4.26 },
-              { symbol: 'AMD', name: 'AMD Inc.', price: 142.50, change: 3.82 },
-              { symbol: 'SMCI', name: 'Super Micro', price: 589.20, change: 3.15 },
-              { symbol: 'ARM', name: 'ARM Holdings', price: 168.45, change: 2.98 },
-              { symbol: 'MU', name: 'Micron', price: 98.32, change: 2.67 },
-            ].map((stock) => (
-              <div 
+            {gainers.length > 0 ? gainers.map((stock) => (
+              <div
                 key={stock.symbol}
                 className="flex items-center justify-between p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
               >
@@ -142,7 +148,9 @@ export function MarketsOverview() {
                   <PercentChange value={stock.change} size="sm" className="ml-2" />
                 </div>
               </div>
-            ))}
+            )) : (
+              <p className="text-sm text-muted-foreground py-4 text-center">No gainers today</p>
+            )}
           </div>
         </div>
 
@@ -153,14 +161,8 @@ export function MarketsOverview() {
             Top Losers
           </h3>
           <div className="space-y-2">
-            {[
-              { symbol: 'BA', name: 'Boeing', price: 178.32, change: -4.52 },
-              { symbol: 'DIS', name: 'Disney', price: 112.45, change: -3.21 },
-              { symbol: 'NFLX', name: 'Netflix', price: 485.20, change: -2.87 },
-              { symbol: 'PFE', name: 'Pfizer', price: 28.45, change: -2.45 },
-              { symbol: 'WBA', name: 'Walgreens', price: 12.34, change: -2.12 },
-            ].map((stock) => (
-              <div 
+            {losers.length > 0 ? losers.map((stock) => (
+              <div
                 key={stock.symbol}
                 className="flex items-center justify-between p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
               >
@@ -173,7 +175,9 @@ export function MarketsOverview() {
                   <PercentChange value={stock.change} size="sm" className="ml-2" />
                 </div>
               </div>
-            ))}
+            )) : (
+              <p className="text-sm text-muted-foreground py-4 text-center">No losers today</p>
+            )}
           </div>
         </div>
       </div>
