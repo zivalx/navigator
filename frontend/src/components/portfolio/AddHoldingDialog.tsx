@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/dialog';
 import { Plus, Upload, AlertCircle, CheckCircle, Home, Wallet } from 'lucide-react';
 import { Currency, AssetType } from '@/lib/types';
-import { getAssetBySymbol, mockAssets } from '@/lib/mockData';
+import { api } from '@/lib/api';
 import { toast } from 'sonner';
 
 export function AddHoldingDialog() {
@@ -43,10 +43,10 @@ export function AddHoldingDialog() {
 
   const handleSubmitAsset = () => {
     setError('');
-    
-    const asset = getAssetBySymbol(symbol);
+
+    const asset = assets.find(a => a.symbol.toUpperCase() === symbol.toUpperCase());
     if (!asset) {
-      setError('Asset not found. Try AAPL, MSFT, GOOGL, etc.');
+      setError('Asset not found. Search and add it first, or use the "Other" tab.');
       return;
     }
 
@@ -330,7 +330,7 @@ export function AddHoldingDialog() {
 }
 
 export function CSVImportDialog() {
-  const { importHoldings } = usePortfolio();
+  const { importHoldings, assets } = usePortfolio();
   const [open, setOpen] = useState(false);
   const [csvData, setCsvData] = useState('');
   const [preview, setPreview] = useState<any[]>([]);
@@ -361,7 +361,7 @@ export function CSVImportDialog() {
       const quantity = parseFloat(values[qtyIdx]);
       const avgCost = parseFloat(values[costIdx]);
 
-      const asset = getAssetBySymbol(symbol);
+      const asset = assets.find(a => a.symbol.toUpperCase() === symbol);
       if (asset && !isNaN(quantity) && !isNaN(avgCost)) {
         holdings.push({
           symbol,

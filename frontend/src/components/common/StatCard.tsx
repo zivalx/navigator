@@ -1,5 +1,6 @@
 import { cn } from '@/lib/utils';
 import { CurrencyDisplay, PercentChange } from './PriceDisplay';
+import { InfoTooltip } from './InfoTooltip';
 
 interface StatCardProps {
   title: string;
@@ -9,20 +10,22 @@ interface StatCardProps {
   currency?: string;
   compact?: boolean;
   icon?: React.ReactNode;
+  tooltip?: string;
   variant?: 'default' | 'primary' | 'success' | 'warning' | 'danger';
   className?: string;
 }
 
-export function StatCard({ 
-  title, 
-  value, 
-  change, 
+export function StatCard({
+  title,
+  value,
+  change,
   changeLabel,
   currency = 'USD',
   compact = true,
   icon,
+  tooltip,
   variant = 'default',
-  className 
+  className
 }: StatCardProps) {
   const variantClasses = {
     default: 'bg-card border-border',
@@ -39,7 +42,10 @@ export function StatCard({
       className
     )}>
       <div className="flex items-start justify-between mb-3">
-        <span className="text-sm font-medium text-muted-foreground">{title}</span>
+        <span className="text-sm font-medium text-muted-foreground">
+          {title}
+          {tooltip && <InfoTooltip text={tooltip} />}
+        </span>
         {icon && (
           <div className="p-2 rounded-lg bg-primary/10 text-primary">
             {icon}

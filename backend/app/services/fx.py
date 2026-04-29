@@ -3,11 +3,14 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import httpx
 import uuid
+import logging
 
 from ..schemas.asset import Currency
 from ..models.price import FxRate
 from ..cache import cache
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class FxService:
@@ -39,6 +42,7 @@ class FxService:
 
             return rate
         except Exception as e:
+            logger.warning("FALLBACK [FX %s→%s]: API failed (%s), trying DB cache", from_currency.value, to_currency.value, e)
             # Fallback to database
             fx_rate = self.db.query(FxRate).filter(
                 FxRate.base_currency == from_currency,
@@ -83,6 +87,7 @@ class FxService:
                 raise ValueError(data.get("error-type", "Unknown error"))
         else:
             # Fallback to free API (no key required, but limited)
+            logger.warning("FALLBACK [FX]: no ExchangeRate API key, using free tier")
             url = f"https://api.exchangerate-api.com/v4/latest/{from_currency.value}"
             response = await self.client.get(url)
             response.raise_for_status()

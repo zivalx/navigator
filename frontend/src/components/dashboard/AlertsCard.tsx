@@ -1,6 +1,7 @@
 import { AlertTriangle, AlertCircle, Info } from 'lucide-react';
 import { usePortfolio } from '@/contexts/PortfolioContext';
 import { EmptyState } from '@/components/common/EmptyState';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { cn } from '@/lib/utils';
 
 export function AlertsCard() {
@@ -33,7 +34,10 @@ export function AlertsCard() {
   if (alerts.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-card p-5">
-        <h3 className="text-lg font-semibold mb-4">Alerts</h3>
+        <h3 className="text-lg font-semibold mb-4">
+          Alerts
+          <InfoTooltip text="Data quality issues — missing prices, unmapped symbols, or API errors affecting your portfolio." />
+        </h3>
         <EmptyState
           icon={<Info className="h-6 w-6" />}
           title="All Good!"
@@ -48,6 +52,7 @@ export function AlertsCard() {
     <div className="rounded-xl border border-border bg-card p-5">
       <h3 className="text-lg font-semibold mb-4">
         Alerts
+        <InfoTooltip text="Data quality issues — missing prices, unmapped symbols, or API errors affecting your portfolio." />
         <span className="ml-2 text-sm font-normal text-muted-foreground">
           ({alerts.length})
         </span>

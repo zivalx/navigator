@@ -2,6 +2,7 @@ import { usePortfolio } from '@/contexts/PortfolioContext';
 import { PriceDisplay, PercentChange, CurrencyDisplay } from '@/components/common/PriceDisplay';
 import { Sparkline } from '@/components/common/Sparkline';
 import { AssetTypeBadge } from '@/components/common/AssetBadge';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { cn } from '@/lib/utils';
 
 export function TopHoldingsCard() {
@@ -9,7 +10,10 @@ export function TopHoldingsCard() {
 
   return (
     <div className="rounded-xl border border-border bg-card p-5">
-      <h3 className="text-lg font-semibold mb-4">Top Holdings</h3>
+      <h3 className="text-lg font-semibold mb-4">
+        Top Holdings
+        <InfoTooltip text="Your largest positions by market value, with weight as % of total portfolio." />
+      </h3>
       <div className="space-y-3">
         {topHoldings.map((holding, index) => (
           <div 
@@ -56,7 +60,10 @@ export function TopMoversCard() {
 
   return (
     <div className="rounded-xl border border-border bg-card p-5">
-      <h3 className="text-lg font-semibold mb-4">Today's Movers</h3>
+      <h3 className="text-lg font-semibold mb-4">
+        Today's Movers
+        <InfoTooltip text="Real market-wide top gainers and losers across all US-listed stocks today, ranked by % change." />
+      </h3>
       
       <div className="space-y-4">
         {/* Gainers */}

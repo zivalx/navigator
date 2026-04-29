@@ -62,7 +62,7 @@ class CoinGeckoProvider(BaseProvider):
                     "price": price,
                     "change": round(change, 2),
                     "changePercent": round(change_percent, 2),
-                    "timestamp": datetime.now(),
+                    "timestamp": datetime.now().isoformat(),
                     "currency": "USD",
                     "volume24h": coin_data.get("usd_24h_vol", 0),
                 }
@@ -102,7 +102,7 @@ class CoinGeckoProvider(BaseProvider):
                         "price": price,
                         "change": round(change, 2),
                         "changePercent": round(change_percent, 2),
-                        "timestamp": datetime.now(),
+                        "timestamp": datetime.now().isoformat(),
                         "currency": "USD",
                         "volume24h": coin_data.get("usd_24h_vol", 0),
                     }

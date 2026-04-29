@@ -22,6 +22,19 @@ class HoldingLotCreate(HoldingLotBase):
     pass
 
 
+class HoldingLotUpdate(BaseModel):
+    quantity: Optional[float] = None
+    avg_cost: Optional[float] = Field(default=None, alias="avgCost")
+    cost_currency: Optional[Currency] = Field(default=None, alias="costCurrency")
+    account_name: Optional[str] = Field(default=None, alias="accountName")
+    tags: Optional[List[str]] = None
+    purchase_date: Optional[datetime] = Field(default=None, alias="purchaseDate")
+
+    class Config:
+        populate_by_name = True
+        use_enum_values = True
+
+
 class HoldingLot(HoldingLotBase):
     id: str
     created_at: datetime = Field(alias="createdAt")

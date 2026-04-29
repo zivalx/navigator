@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { usePortfolio } from '@/contexts/PortfolioContext';
+import { api } from '@/lib/api';
 import { PercentChange } from '@/components/common/PriceDisplay';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,18 +67,61 @@ export function WatchlistTable() {
 
   const activeWatchlist = watchlists.find(wl => wl.id === activeWatchlistId);
 
+  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
+
   const handleSearch = (query: string) => {
     setSymbolSearch(query);
-    if (query.length >= 1) {
-      setSearchResults(searchAssets(query));
-    } else {
+    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+
+    if (query.length < 1) {
       setSearchResults([]);
+      return;
     }
+
+    // Show local matches immediately
+    setSearchResults(searchAssets(query));
+
+    // Then search via API for assets not in DB (debounced)
+    searchTimeout.current = setTimeout(async () => {
+      try {
+        const apiResults = await api.searchAssets(query);
+        setSearchResults(apiResults);
+      } catch {
+        // Keep showing local results on API failure
+      }
+    }, 300);
   };
 
-  const handleAddToWatchlist = (assetId: string, symbol: string) => {
-    addToWatchlist(assetId);
-    toast.success(`Added ${symbol} to ${activeWatchlist?.name || 'watchlist'}`);
+  const handleAddToWatchlist = async (asset: any) => {
+    try {
+      let assetId = asset.id;
+
+      // If the asset isn't in our DB yet, find or create it
+      if (!assetId) {
+        // Try to find by symbol first
+        try {
+          const existing = await api.getAssetBySymbol(asset.symbol);
+          assetId = existing.id;
+        } catch {
+          // Not found — create it
+          const created = await api.createAsset({
+            symbol: asset.symbol,
+            name: asset.name,
+            exchange: asset.exchange || '',
+            currency: asset.currency || 'USD',
+            asset_type: asset.assetType || asset.asset_type || 'stock',
+            market_region: asset.marketRegion || asset.market_region || 'US',
+            provider_ids: {},
+          });
+          assetId = created.id;
+        }
+      }
+
+      addToWatchlist(assetId);
+      toast.success(`Added ${asset.symbol} to ${activeWatchlist?.name || 'watchlist'}`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to add symbol');
+    }
     setAddDialogOpen(false);
     setSymbolSearch('');
     setSearchResults([]);
@@ -310,11 +354,11 @@ export function WatchlistTable() {
               />
               {searchResults.length > 0 && (
                 <div className="mt-3 border border-border rounded-lg overflow-hidden max-h-64 overflow-y-auto bg-popover">
-                  {searchResults.map(asset => (
+                  {searchResults.map((asset, idx) => (
                     <button
-                      key={asset.id}
+                      key={asset.id || `${asset.symbol}-${idx}`}
                       className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/50 transition-colors border-b border-border last:border-0"
-                      onClick={() => handleAddToWatchlist(asset.id, asset.symbol)}
+                      onClick={() => handleAddToWatchlist(asset)}
                     >
                       <div className="flex items-center gap-3">
                         <span className="font-semibold">{asset.symbol}</span>

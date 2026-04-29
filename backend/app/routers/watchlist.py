@@ -35,11 +35,37 @@ async def create_watchlist(
     db: Session = Depends(get_db)
 ):
     """Create a new watchlist."""
+    if not watchlist_in.name or not watchlist_in.name.strip():
+        raise HTTPException(status_code=400, detail="Watchlist name cannot be empty")
+
     watchlist = models.Watchlist(
         id=str(uuid.uuid4()),
         name=watchlist_in.name,
     )
     db.add(watchlist)
+    db.commit()
+    db.refresh(watchlist)
+    return watchlist
+
+
+@router.put("/{watchlist_id}", response_model=schemas.Watchlist)
+async def rename_watchlist(
+    watchlist_id: str,
+    watchlist_in: schemas.WatchlistUpdate,
+    db: Session = Depends(get_db)
+):
+    """Rename a watchlist."""
+    watchlist = db.query(models.Watchlist).filter(
+        models.Watchlist.id == watchlist_id
+    ).first()
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+
+    if watchlist_in.name is not None:
+        if not watchlist_in.name.strip():
+            raise HTTPException(status_code=400, detail="Watchlist name cannot be empty")
+        watchlist.name = watchlist_in.name.strip()
+
     db.commit()
     db.refresh(watchlist)
     return watchlist
@@ -61,13 +87,21 @@ async def delete_watchlist(watchlist_id: str, db: Session = Depends(get_db)):
 
 @router.get("/{watchlist_id}/items", response_model=List[schemas.WatchlistItemWithAsset])
 async def get_watchlist_items(watchlist_id: str, db: Session = Depends(get_db)):
-    """Get all items in a watchlist with current prices."""
+    """Get all items in a watchlist with current prices (best-effort)."""
     from ..services.market_data import MarketDataService
+
+    # Verify watchlist exists
+    watchlist = db.query(models.Watchlist).filter(
+        models.Watchlist.id == watchlist_id
+    ).first()
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
 
     items = db.query(models.WatchlistItem).filter(
         models.WatchlistItem.watchlist_id == watchlist_id
     ).all()
 
+    # Return items immediately, enrich with prices best-effort
     market_service = MarketDataService(db)
     result = []
 
@@ -80,9 +114,12 @@ async def get_watchlist_items(watchlist_id: str, db: Session = Depends(get_db)):
             "targetPrice": item.target_price,
             "createdAt": item.created_at,
             "asset": item.asset,
+            "currentPrice": None,
+            "priceChange": None,
+            "priceChangePercent": None,
         }
 
-        # Get current price
+        # Best-effort price enrichment — never block the response
         try:
             quote = await market_service.get_quote(item.asset.symbol)
             item_dict["currentPrice"] = quote.get("price")
@@ -115,6 +152,10 @@ async def add_watchlist_item(
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
 
+    # Validate target price
+    if item_in.target_price is not None and item_in.target_price < 0:
+        raise HTTPException(status_code=400, detail="Target price cannot be negative")
+
     # Check if item already exists
     existing = db.query(models.WatchlistItem).filter(
         models.WatchlistItem.watchlist_id == watchlist_id,
@@ -134,6 +175,34 @@ async def add_watchlist_item(
         target_price=item_in.target_price,
     )
     db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@router.put("/items/{item_id}", response_model=schemas.WatchlistItem)
+async def update_watchlist_item(
+    item_id: str,
+    item_in: schemas.WatchlistItemUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update a watchlist item's notes or target price."""
+    item = db.query(models.WatchlistItem).filter(
+        models.WatchlistItem.id == item_id
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Watchlist item not found")
+
+    update_data = item_in.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    if "target_price" in update_data and update_data["target_price"] is not None and update_data["target_price"] < 0:
+        raise HTTPException(status_code=400, detail="Target price cannot be negative")
+
+    for field, value in update_data.items():
+        setattr(item, field, value)
+
     db.commit()
     db.refresh(item)
     return item

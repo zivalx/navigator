@@ -229,8 +229,8 @@ def main():
         print("\n🎉 Database seeded successfully!")
         print("\nYou can now:")
         print("  - Start the API: uvicorn app.main:app --reload")
-        print("  - View docs: http://localhost:8000/docs")
-        print("  - Get portfolio: http://localhost:8000/api/portfolio/summary")
+        print("  - View docs: http://localhost:7000/docs")
+        print("  - Get portfolio: http://localhost:7000/api/portfolio/summary")
 
     except Exception as e:
         print(f"\n❌ Error seeding database: {e}")

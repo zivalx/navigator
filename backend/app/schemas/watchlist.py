@@ -15,6 +15,13 @@ class WatchlistCreate(WatchlistBase):
     pass
 
 
+class WatchlistUpdate(BaseModel):
+    name: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
 class Watchlist(WatchlistBase):
     id: str
     created_at: datetime = Field(alias="createdAt")
@@ -34,8 +41,14 @@ class WatchlistItemBase(BaseModel):
         populate_by_name = True
 
 
-class WatchlistItemCreate(WatchlistItemBase):
-    pass
+class WatchlistItemCreate(BaseModel):
+    """Create schema — watchlist_id comes from URL, not body."""
+    asset_id: str = Field(alias="assetId")
+    notes: Optional[str] = None
+    target_price: Optional[float] = Field(default=None, alias="targetPrice")
+
+    class Config:
+        populate_by_name = True
 
 
 class WatchlistItem(WatchlistItemBase):
@@ -44,6 +57,14 @@ class WatchlistItem(WatchlistItemBase):
 
     class Config:
         from_attributes = True
+        populate_by_name = True
+
+
+class WatchlistItemUpdate(BaseModel):
+    notes: Optional[str] = None
+    target_price: Optional[float] = Field(default=None, alias="targetPrice")
+
+    class Config:
         populate_by_name = True
 
 

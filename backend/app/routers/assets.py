@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
@@ -12,8 +12,8 @@ router = APIRouter()
 
 @router.get("/", response_model=List[schemas.Asset])
 async def get_assets(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=0, le=1000),
     db: Session = Depends(get_db)
 ):
     """Get all assets."""
@@ -47,6 +47,11 @@ async def create_asset(
     db: Session = Depends(get_db)
 ):
     """Create a new asset."""
+    if not asset_in.symbol.strip():
+        raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+    if not asset_in.name.strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
     # Check if asset with symbol already exists
     existing = db.query(models.Asset).filter(
         models.Asset.symbol == asset_in.symbol.upper()
@@ -85,6 +90,23 @@ async def update_asset(
         raise HTTPException(status_code=404, detail="Asset not found")
 
     update_data = asset_in.model_dump(exclude_unset=True)
+
+    # Validate symbol uniqueness if changing symbol
+    if "symbol" in update_data:
+        new_symbol = update_data["symbol"].upper() if update_data["symbol"] else ""
+        if not new_symbol.strip():
+            raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+        existing = db.query(models.Asset).filter(
+            models.Asset.symbol == new_symbol,
+            models.Asset.id != asset_id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Asset with symbol {new_symbol} already exists")
+        update_data["symbol"] = new_symbol
+
+    if "name" in update_data and not update_data["name"].strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
     for field, value in update_data.items():
         setattr(asset, field, value)
 
