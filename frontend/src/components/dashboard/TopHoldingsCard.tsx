@@ -72,9 +72,12 @@ export function TopMoversCard() {
             <span className="text-xs">▲</span> Top Gainers
           </h4>
           <div className="space-y-2">
-            {topMovers.gainers.map((mover, index) => (
-              <div 
-                key={mover.asset.id}
+            {topMovers.gainers.length === 0 && (
+              <span className="text-xs text-muted-foreground">Loading...</span>
+            )}
+            {topMovers.gainers.map((mover) => (
+              <div
+                key={mover.asset.symbol}
                 className="flex items-center justify-between p-2 rounded-lg bg-success/5 border border-success/10"
               >
                 <div className="flex items-center gap-2">
@@ -95,9 +98,12 @@ export function TopMoversCard() {
             <span className="text-xs">▼</span> Top Losers
           </h4>
           <div className="space-y-2">
-            {topMovers.losers.map((mover, index) => (
-              <div 
-                key={mover.asset.id}
+            {topMovers.losers.length === 0 && (
+              <span className="text-xs text-muted-foreground">Loading...</span>
+            )}
+            {topMovers.losers.map((mover) => (
+              <div
+                key={mover.asset.symbol}
                 className="flex items-center justify-between p-2 rounded-lg bg-destructive/5 border border-destructive/10"
               >
                 <div className="flex items-center gap-2">

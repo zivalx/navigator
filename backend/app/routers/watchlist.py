@@ -117,14 +117,29 @@ async def get_watchlist_items(watchlist_id: str, db: Session = Depends(get_db)):
             "currentPrice": None,
             "priceChange": None,
             "priceChangePercent": None,
+            "change1d": None,
+            "change1m": None,
+            "change6m": None,
         }
 
-        # Best-effort price enrichment — never block the response
+        # Best-effort price + historical enrichment
         try:
             quote = await market_service.get_quote(item.asset.symbol)
             item_dict["currentPrice"] = quote.get("price")
             item_dict["priceChange"] = quote.get("change")
             item_dict["priceChangePercent"] = quote.get("changePercent")
+            # Backfill exchange if asset has none
+            if not item.asset.exchange and quote.get("exchange"):
+                item.asset.exchange = quote["exchange"]
+                db.commit()
+        except Exception:
+            pass
+
+        try:
+            hist = await market_service.get_historical_changes(item.asset.symbol)
+            item_dict["change1d"] = hist.get("change_1d")
+            item_dict["change1m"] = hist.get("change_1m")
+            item_dict["change6m"] = hist.get("change_6m")
         except Exception:
             pass
 

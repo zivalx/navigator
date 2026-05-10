@@ -4,11 +4,7 @@ import { WatchlistTable } from '@/components/watchlist/WatchlistTable';
 const Watchlist = () => {
   return (
     <AppLayout>
-      <div className="space-y-6 animate-fade-in">
-        <div>
-          <h1 className="text-2xl font-bold mb-1">Watchlist</h1>
-          <p className="text-muted-foreground">Track assets you're interested in</p>
-        </div>
+      <div className="space-y-4 animate-fade-in">
         <WatchlistTable />
       </div>
     </AppLayout>

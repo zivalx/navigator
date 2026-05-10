@@ -74,6 +74,9 @@ class WatchlistItemWithAsset(WatchlistItem):
     current_price: Optional[float] = Field(default=None, alias="currentPrice")
     price_change: Optional[float] = Field(default=None, alias="priceChange")
     price_change_percent: Optional[float] = Field(default=None, alias="priceChangePercent")
+    change_1d: Optional[float] = Field(default=None, alias="change1d")
+    change_1m: Optional[float] = Field(default=None, alias="change1m")
+    change_6m: Optional[float] = Field(default=None, alias="change6m")
 
     class Config:
         from_attributes = True

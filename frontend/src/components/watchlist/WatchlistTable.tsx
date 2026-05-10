@@ -255,86 +255,85 @@ export function WatchlistTable() {
 
   return (
     <div className="space-y-4">
-      {/* Watchlist Tabs */}
-      <div className="flex items-center gap-3">
-        <Tabs value={activeWatchlistId || ''} onValueChange={setActiveWatchlistId} className="flex-1">
-          <TabsList className="h-auto p-1 bg-muted/50">
-            {watchlists.map(wl => (
-              <TabsTrigger 
-                key={wl.id} 
-                value={wl.id}
-                className="gap-2 data-[state=active]:bg-background"
-              >
-                {wl.name}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                    <Button variant="ghost" size="icon" className="h-5 w-5 ml-1 hover:bg-muted">
-                      <MoreHorizontal className="h-3 w-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="bg-popover">
-                    <DropdownMenuItem onClick={() => openRenameDialog(wl.id)}>
-                      <Edit2 className="h-4 w-4 mr-2" /> Rename
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem 
-                      className="text-destructive"
-                      onClick={() => openDeleteDialog(wl.id)}
-                      disabled={watchlists.length === 1}
-                    >
-                      <Trash2 className="h-4 w-4 mr-2" /> Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-        
-        <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-          <DialogTrigger asChild>
-            <Button variant="outline" size="sm" className="gap-2">
-              <FolderPlus className="h-4 w-4" />
-              New List
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create Watchlist</DialogTitle>
-              <DialogDescription>
-                Give your watchlist a name to get started.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="py-4">
-              <Input
-                placeholder="Watchlist name..."
-                value={newWatchlistName}
-                onChange={(e) => setNewWatchlistName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleCreateWatchlist()}
-              />
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleCreateWatchlist} disabled={!newWatchlistName.trim()}>Create</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </div>
-
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row gap-3 justify-between">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search watchlist..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9"
-          />
+      {/* Header row: title + tabs + actions */}
+      <div className="flex flex-col sm:flex-row justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Watchlist</h1>
+          <Tabs value={activeWatchlistId || ''} onValueChange={setActiveWatchlistId}>
+            <TabsList className="h-auto p-1 bg-muted/50">
+              {watchlists.map(wl => (
+                <TabsTrigger
+                  key={wl.id}
+                  value={wl.id}
+                  className="gap-1.5 data-[state=active]:bg-background text-sm"
+                >
+                  {wl.name}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
+                      <Button variant="ghost" size="icon" className="h-5 w-5 ml-0.5 hover:bg-muted">
+                        <MoreHorizontal className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="bg-popover">
+                      <DropdownMenuItem onClick={() => openRenameDialog(wl.id)}>
+                        <Edit2 className="h-4 w-4 mr-2" /> Rename
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="text-destructive"
+                        onClick={() => openDeleteDialog(wl.id)}
+                        disabled={watchlists.length === 1}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" /> Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
         </div>
-        <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Filter..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 w-40"
+            />
+          </div>
+          <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <FolderPlus className="h-4 w-4" />
+                New List
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Create Watchlist</DialogTitle>
+                <DialogDescription>
+                  Give your watchlist a name to get started.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="py-4">
+                <Input
+                  placeholder="Watchlist name..."
+                  value={newWatchlistName}
+                  onChange={(e) => setNewWatchlistName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreateWatchlist()}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
+                <Button onClick={handleCreateWatchlist} disabled={!newWatchlistName.trim()}>Create</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
           <DialogTrigger asChild>
-            <Button className="gap-2">
+            <Button size="sm" className="gap-1.5">
               <Plus className="h-4 w-4" />
               Add Symbol
             </Button>
@@ -371,7 +370,8 @@ export function WatchlistTable() {
               )}
             </div>
           </DialogContent>
-        </Dialog>
+          </Dialog>
+        </div>
       </div>
 
       {/* Empty state for active watchlist */}
@@ -398,7 +398,9 @@ export function WatchlistTable() {
                 <TableHead>Symbol</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead className="text-right">Price</TableHead>
-                <TableHead className="text-right">Change</TableHead>
+                <TableHead className="text-right">24h</TableHead>
+                <TableHead className="text-right">1M</TableHead>
+                <TableHead className="text-right">6M</TableHead>
                 <TableHead className="text-right">Target</TableHead>
                 <TableHead>Notes</TableHead>
                 <TableHead className="w-10"></TableHead>
@@ -408,7 +410,12 @@ export function WatchlistTable() {
               {filteredWatchlist.map((item) => (
                 <TableRow key={item.id} className="hover:bg-muted/30">
                   <TableCell>
-                    <span className="font-semibold">{item.asset.symbol}</span>
+                    <div>
+                      <span className="font-semibold">{item.asset.symbol}</span>
+                      {item.asset.exchange && (
+                        <span className="ml-1.5 text-[10px] text-muted-foreground/60">{item.asset.exchange}</span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <span className="text-sm text-muted-foreground">
@@ -423,8 +430,22 @@ export function WatchlistTable() {
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    {item.priceChangePercent !== undefined ? (
-                      <PercentChange value={item.priceChangePercent} size="sm" />
+                    {item.change1d != null ? (
+                      <PercentChange value={item.change1d} size="sm" />
+                    ) : (
+                      <span className="text-muted-foreground text-sm">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {item.change1m != null ? (
+                      <PercentChange value={item.change1m} size="sm" />
+                    ) : (
+                      <span className="text-muted-foreground text-sm">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {item.change6m != null ? (
+                      <PercentChange value={item.change6m} size="sm" />
                     ) : (
                       <span className="text-muted-foreground text-sm">—</span>
                     )}

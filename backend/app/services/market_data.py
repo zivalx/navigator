@@ -213,6 +213,20 @@ class MarketDataService:
         """Get top losing stocks from live providers."""
         return await self._get_movers("losers", limit)
 
+    async def get_historical_changes(self, symbol: str) -> Dict:
+        """Get 1d, 1mo, 6mo change % for a symbol via Yahoo."""
+        cache_key = f"hist:{symbol.upper()}"
+        cached = await cache.get(cache_key)
+        if cached:
+            return cached
+        try:
+            changes = await self.yahoo.get_historical_changes(symbol)
+            if changes:
+                await cache.set(cache_key, changes, ttl=1800)
+            return changes
+        except Exception:
+            return {}
+
     async def search_assets(self, query: str, limit: int = 10) -> List[Dict]:
         """Search for assets by name or ticker symbol."""
         try:

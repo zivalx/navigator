@@ -39,6 +39,10 @@ export interface WatchlistItem {
   notes?: string;
   targetPrice?: number;
   createdAt: Date;
+  currentPrice?: number;
+  priceChange?: number;
+  priceChangePercent?: number;
+  asset?: Asset;
 }
 
 export interface Watchlist {
@@ -117,6 +121,9 @@ export interface WatchlistItemWithAsset extends WatchlistItem {
   currentPrice?: number;
   priceChange?: number;
   priceChangePercent?: number;
+  change1d?: number;
+  change1m?: number;
+  change6m?: number;
 }
 
 export interface PortfolioSummary {
