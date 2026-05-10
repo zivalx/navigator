@@ -57,6 +57,7 @@ class YahooFinanceProvider(BaseProvider):
             "changePercent": change_pct,
             "timestamp": datetime.now().isoformat(),
             "currency": meta.get("currency", "USD"),
+            "exchange": meta.get("fullExchangeName", meta.get("exchangeName", "")),
             "source": "yahoo",
         }
 
@@ -69,6 +70,53 @@ class YahooFinanceProvider(BaseProvider):
             except Exception:
                 continue
         return results
+
+    async def get_historical_changes(self, symbol: str) -> Dict:
+        """
+        Get price change % over multiple periods: 1d, 1mo, 6mo.
+        Uses Yahoo chart endpoint with 6mo range, interval=1d.
+        """
+        url = self.QUERY_URL.format(symbol=symbol.upper())
+        params = {"interval": "1d", "range": "6mo"}
+
+        response = await self.client.get(url, params=params, headers=self.HEADERS)
+        response.raise_for_status()
+        data = response.json()
+
+        result = data.get("chart", {}).get("result")
+        if not result:
+            return {}
+
+        meta = result[0].get("meta", {})
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        # Filter out None values but keep index alignment
+        valid_closes = [c for c in closes if c is not None]
+
+        if not valid_closes:
+            return {}
+
+        current = meta.get("regularMarketPrice", valid_closes[-1])
+
+        changes = {}
+
+        # 1d change — use second-to-last close as yesterday's close
+        if len(valid_closes) >= 2:
+            prev = valid_closes[-2]
+            if prev and prev > 0:
+                changes["change_1d"] = round((current - prev) / prev * 100, 2)
+
+        # 1mo change (~21 trading days back)
+        if len(valid_closes) >= 21:
+            price_1m = valid_closes[-21]
+            if price_1m and price_1m > 0:
+                changes["change_1m"] = round((current - price_1m) / price_1m * 100, 2)
+
+        # 6mo change (first close in range)
+        price_6m = valid_closes[0]
+        if price_6m and price_6m > 0:
+            changes["change_6m"] = round((current - price_6m) / price_6m * 100, 2)
+
+        return changes
 
     async def get_movers(self, direction: str = "gainers", limit: int = 10) -> List[Dict]:
         """

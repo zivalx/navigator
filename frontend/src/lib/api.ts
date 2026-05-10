@@ -50,6 +50,10 @@ export const api = {
     request<Record<string, any>>(`/markets/quotes?symbols=${symbols.join(",")}`),
   searchAssets: (query: string) => request<any[]>(`/markets/search?q=${encodeURIComponent(query)}`),
 
+  // Movers
+  getTopGainers: (limit = 5) => request<any[]>(`/markets/movers/gainers?limit=${limit}`),
+  getTopLosers: (limit = 5) => request<any[]>(`/markets/movers/losers?limit=${limit}`),
+
   // News
   getNews: () => request<any[]>("/news"),
 };

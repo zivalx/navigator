@@ -20,6 +20,7 @@ interface PortfolioContextType {
   holdingsWithAssets: HoldingWithAsset[];
   groupedHoldings: GroupedHolding[];
   watchlistWithAssets: WatchlistItemWithAsset[];
+  watchedAssetIds: Set<string>;
   portfolioSummary: PortfolioSummary;
   topHoldings: HoldingWithAsset[];
   topMovers: { gainers: MarketMover[]; losers: MarketMover[] };
@@ -59,6 +60,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const [holdings, setHoldings] = useState<HoldingLot[]>([]);
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItem[]>([]);
+  const [watchedAssetIds, setWatchedAssetIds] = useState<Set<string>>(new Set());
   const [activeWatchlistId, setActiveWatchlistId] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [baseCurrency, setBaseCurrency] = useState<Currency>('USD');
@@ -140,6 +142,19 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         setActiveWatchlistId(mappedWatchlists[0].id);
       }
 
+      // Build set of all watched asset IDs across all watchlists
+      const allWatchedIds = new Set<string>();
+      await Promise.all(mappedWatchlists.map(async (wl) => {
+        try {
+          const items = await api.getWatchlistItems(wl.id);
+          items.forEach((item: any) => {
+            const aid = item.assetId || item.asset_id;
+            if (aid) allWatchedIds.add(aid);
+          });
+        } catch { /* skip failed lists */ }
+      }));
+      setWatchedAssetIds(allWatchedIds);
+
       setLastUpdated(new Date());
     } catch (err) {
       console.error('Failed to fetch portfolio data:', err);
@@ -169,6 +184,21 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           notes: item.notes,
           targetPrice: item.targetPrice || item.target_price,
           createdAt: new Date(item.createdAt || item.created_at || Date.now()),
+          currentPrice: item.currentPrice ?? item.current_price,
+          priceChange: item.priceChange ?? item.price_change,
+          priceChangePercent: item.priceChangePercent ?? item.price_change_percent,
+          change1d: item.change1d ?? item.change_1d,
+          change1m: item.change1m ?? item.change_1m,
+          change6m: item.change6m ?? item.change_6m,
+          asset: item.asset ? {
+            id: item.asset.id,
+            symbol: item.asset.symbol,
+            name: item.asset.name,
+            exchange: item.asset.exchange,
+            currency: (item.asset.currency || 'USD').toUpperCase(),
+            assetType: item.asset.assetType || item.asset.asset_type,
+            marketRegion: item.asset.marketRegion || item.asset.market_region || 'US',
+          } : undefined,
         })));
       })
       .catch((err) => {
@@ -250,27 +280,44 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     });
   }, [holdingsWithWeights]);
 
-  // Top movers
-  const topMovers = useMemo(() => {
-    const withChange = holdingsWithWeights.filter(h => h.priceChangePercent !== undefined);
-    const sorted = [...withChange].sort((a, b) => (b.priceChangePercent || 0) - (a.priceChangePercent || 0));
-    return {
-      gainers: sorted.filter(h => (h.priceChangePercent || 0) > 0).slice(0, 3).map(h => ({
-        asset: h.asset, price: h.currentPrice || 0, change: h.priceChange || 0, changePercent: h.priceChangePercent || 0,
-      })),
-      losers: sorted.filter(h => (h.priceChangePercent || 0) < 0).slice(-3).reverse().map(h => ({
-        asset: h.asset, price: h.currentPrice || 0, change: h.priceChange || 0, changePercent: h.priceChangePercent || 0,
-      })),
-    };
-  }, [holdingsWithWeights]);
+  // Top movers — fetched from real market data API
+  const [topMovers, setTopMovers] = useState<{ gainers: MarketMover[]; losers: MarketMover[] }>({ gainers: [], losers: [] });
 
-  // Watchlist items with assets
+  useEffect(() => {
+    Promise.all([
+      api.getTopGainers(5).catch(() => []),
+      api.getTopLosers(5).catch(() => []),
+    ]).then(([gainers, losers]) => {
+      setTopMovers({
+        gainers: gainers.map((m: any) => ({
+          asset: { id: m.symbol, symbol: m.symbol, name: m.name || '', currency: 'USD', assetType: 'stock', marketRegion: 'US' },
+          price: m.price || 0,
+          change: m.change || 0,
+          changePercent: m.changePercent || 0,
+        })),
+        losers: losers.map((m: any) => ({
+          asset: { id: m.symbol, symbol: m.symbol, name: m.name || '', currency: 'USD', assetType: 'stock', marketRegion: 'US' },
+          price: m.price || 0,
+          change: m.change || 0,
+          changePercent: m.changePercent || 0,
+        })),
+      });
+    });
+  }, [lastUpdated]);
+
+  // Watchlist items with assets — prices come from the API response
   const watchlistWithAssets: WatchlistItemWithAsset[] = useMemo(() => {
-    return watchlistItems.map(item => {
-      const asset = assets.find(a => a.id === item.assetId);
+    return watchlistItems.map((item: any) => {
+      const asset = item.asset || assets.find(a => a.id === item.assetId) || { id: item.assetId, symbol: 'UNKNOWN', name: 'Unknown', currency: 'USD' as Currency, assetType: 'stock' as const, marketRegion: 'US' as const };
       return {
         ...item,
-        asset: asset || { id: item.assetId, symbol: 'UNKNOWN', name: 'Unknown', currency: 'USD' as Currency, assetType: 'stock' as const, marketRegion: 'US' as const },
+        asset,
+        currentPrice: item.currentPrice,
+        priceChange: item.priceChange,
+        priceChangePercent: item.priceChangePercent,
+        change1d: item.change1d,
+        change1m: item.change1m,
+        change6m: item.change6m,
       };
     });
   }, [watchlistItems, assets]);
@@ -395,6 +442,8 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         notes,
         target_price: targetPrice,
       });
+      // Track in watched set
+      setWatchedAssetIds(prev => new Set(prev).add(assetId));
       // Refresh watchlist items
       const items = await api.getWatchlistItems(targetId);
       setWatchlistItems(items.map((item: any) => ({
@@ -470,6 +519,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       holdingsWithAssets: holdingsWithWeights,
       groupedHoldings,
       watchlistWithAssets,
+      watchedAssetIds,
       portfolioSummary,
       topHoldings,
       topMovers,

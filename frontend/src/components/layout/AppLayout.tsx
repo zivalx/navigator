@@ -52,7 +52,7 @@ function AppSidebar() {
             <TrendingUp className="h-5 w-5 text-primary-foreground" />
           </div>
           {!collapsed && (
-            <span className="text-xl font-semibold">InvestDash</span>
+            <span className="text-xl font-semibold">NAVigator</span>
           )}
         </Link>
       </SidebarHeader>
