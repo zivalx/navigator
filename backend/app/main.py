@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from .config import settings
 from .cache import cache
 from .database import init_db
+from .tasks.scheduler import start_scheduler, shutdown_scheduler
 
 
 @asynccontextmanager
@@ -20,11 +21,15 @@ async def lifespan(app: FastAPI):
     await cache.connect()
     print("✅ Redis connected")
 
+    start_scheduler()
+    print("Scheduler started")
+
     yield
 
     # Shutdown
+    shutdown_scheduler()
     await cache.disconnect()
-    print("👋 Shutting down...")
+    print("Shutting down...")
 
 
 app = FastAPI(
