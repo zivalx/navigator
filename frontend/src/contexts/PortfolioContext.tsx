@@ -5,6 +5,7 @@ import {
 } from '@/lib/types';
 import { api } from '@/lib/api';
 import { toast } from 'sonner';
+import { useAppSettings } from '@/contexts/AppSettingsContext';
 
 interface PortfolioContextType {
   // Data
@@ -28,7 +29,6 @@ interface PortfolioContextType {
   // Settings
   baseCurrency: Currency;
   setBaseCurrency: (currency: Currency) => void;
-  isDemoMode: boolean;
   lastUpdated: Date;
   isLoading: boolean;
 
@@ -63,11 +63,19 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   const [watchedAssetIds, setWatchedAssetIds] = useState<Set<string>>(new Set());
   const [activeWatchlistId, setActiveWatchlistId] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
-  const [baseCurrency, setBaseCurrency] = useState<Currency>('USD');
+  const [baseCurrency, setBaseCurrency] = useState<Currency>(() => {
+    const saved = localStorage.getItem('baseCurrency');
+    return (saved as Currency) || 'USD';
+  });
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const isDemoMode = false;
+  const { refreshIntervalMs } = useAppSettings();
+
+  // Persist base currency selection
+  useEffect(() => {
+    localStorage.setItem('baseCurrency', baseCurrency);
+  }, [baseCurrency]);
 
   // Fetch all data from API
   const fetchData = useCallback(async () => {
@@ -75,7 +83,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       setIsLoading(true);
       const [assetsData, holdingsData, watchlistsData] = await Promise.all([
         api.getAssets(),
-        api.getHoldings().catch(() => []),
+        api.getHoldings(baseCurrency).catch(() => []),
         api.getWatchlists().catch(() => []),
       ]);
 
@@ -167,7 +175,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [baseCurrency]);
 
   // Fetch watchlist items when active watchlist changes
   useEffect(() => {
@@ -501,11 +509,12 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     ).slice(0, 10);
   }, [assets]);
 
-  // Auto-refresh every 60 seconds
+  // Auto-refresh at the user-configured interval (disabled when "Manual only" is selected)
   useEffect(() => {
-    const interval = setInterval(fetchData, 60000);
+    if (refreshIntervalMs === false) return;
+    const interval = setInterval(fetchData, refreshIntervalMs);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, refreshIntervalMs]);
 
   return (
     <PortfolioContext.Provider value={{
@@ -525,7 +534,6 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       topMovers,
       baseCurrency,
       setBaseCurrency,
-      isDemoMode,
       lastUpdated,
       isLoading,
       refreshPrices,

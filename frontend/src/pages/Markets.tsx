@@ -1,5 +1,6 @@
 import { AppLayout } from '@/components/layout/AppLayout';
 import { MarketsOverview } from '@/components/markets/MarketsOverview';
+import { IndicatorsStrip } from '@/components/markets/IndicatorsStrip';
 
 const Markets = () => {
   return (
@@ -9,6 +10,7 @@ const Markets = () => {
           <h1 className="text-2xl font-bold mb-1">Markets</h1>
           <p className="text-muted-foreground">Global market overview and top movers</p>
         </div>
+        <IndicatorsStrip />
         <MarketsOverview />
       </div>
     </AppLayout>

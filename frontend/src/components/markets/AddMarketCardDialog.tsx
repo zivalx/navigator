@@ -19,7 +19,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { DataSource, dataSourceLabels } from '@/lib/marketCardTypes';
 import { useMarketCards } from '@/contexts/MarketCardsContext';
 import { toast } from 'sonner';
 
@@ -43,7 +42,6 @@ export function AddMarketCardDialog() {
   const [open, setOpen] = useState(false);
   const [symbol, setSymbol] = useState('');
   const [name, setName] = useState('');
-  const [dataSource, setDataSource] = useState<DataSource>('demo');
   const [region, setRegion] = useState<'US' | 'EU' | 'ASIA'>('US');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -58,7 +56,7 @@ export function AddMarketCardDialog() {
       toast.error(`${sym} is already in your market cards`);
       return;
     }
-    addCard(sym, symName, dataSource, region);
+    addCard(sym, symName, region);
     toast.success(`Added ${sym} to market cards`);
   };
 
@@ -71,7 +69,7 @@ export function AddMarketCardDialog() {
       toast.error(`${symbol.toUpperCase()} is already in your market cards`);
       return;
     }
-    addCard(symbol, name || symbol, dataSource, region);
+    addCard(symbol, name || symbol, region);
     toast.success(`Added ${symbol.toUpperCase()} to market cards`);
     setSymbol('');
     setName('');
@@ -163,35 +161,18 @@ export function AddMarketCardDialog() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label>Data Source</Label>
-                <Select value={dataSource} onValueChange={(v) => setDataSource(v as DataSource)}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(dataSourceLabels) as DataSource[]).map((source) => (
-                      <SelectItem key={source} value={source}>
-                        {dataSourceLabels[source]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Region</Label>
-                <Select value={region} onValueChange={(v) => setRegion(v as 'US' | 'EU' | 'ASIA')}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="US">🇺🇸 US</SelectItem>
-                    <SelectItem value="EU">🇪🇺 Europe</SelectItem>
-                    <SelectItem value="ASIA">🌏 Asia</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-2">
+              <Label>Region</Label>
+              <Select value={region} onValueChange={(v) => setRegion(v as 'US' | 'EU' | 'ASIA')}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="US">🇺🇸 US</SelectItem>
+                  <SelectItem value="EU">🇪🇺 Europe</SelectItem>
+                  <SelectItem value="ASIA">🌏 Asia</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </div>

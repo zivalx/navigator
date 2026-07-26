@@ -153,3 +153,84 @@ export interface Alert {
   assetId?: string;
   timestamp: Date;
 }
+
+// Market indicators (Fear & Greed, VIX, indices, rates, fx, commodities, crypto, breadth)
+export type IndicatorCategory =
+  | 'sentiment'
+  | 'volatility'
+  | 'breadth'
+  | 'index'
+  | 'rates'
+  | 'fx'
+  | 'commodities'
+  | 'crypto';
+
+export type IndicatorRating = 'extreme_fear' | 'fear' | 'neutral' | 'greed' | 'extreme_greed';
+
+export interface MarketIndicator {
+  key: string;
+  label: string;
+  category: IndicatorCategory;
+  value: number | null;
+  unit: string;
+  rating: IndicatorRating | null;
+  change: number | null;
+  change_pct: number | null;
+  source: string;
+  error: string | null;
+}
+
+export interface IndicatorsResponse {
+  as_of: string;
+  indicators: MarketIndicator[];
+}
+
+// Price alerts / stop-loss (spec: docs/superpowers/specs/2026-07-23-price-alerts-design.md)
+export type PriceAlertRule = 'price_below' | 'price_above';
+export type PriceAlertStatus = 'active' | 'triggered' | 'unacknowledged';
+
+export interface PriceAlert {
+  id: string;
+  assetId: string;
+  symbol: string;
+  name: string;
+  rule: PriceAlertRule;
+  threshold: number;
+  note?: string;
+  isActive: boolean;
+  createdAt: Date;
+  triggeredAt?: Date | null;
+  triggeredPrice?: number | null;
+  acknowledgedAt?: Date | null;
+}
+
+export interface CreatePriceAlertPayload {
+  assetId?: string;
+  symbol?: string;
+  rule: PriceAlertRule;
+  threshold: number;
+  note?: string;
+}
+
+export interface UpdatePriceAlertPayload {
+  rule?: PriceAlertRule;
+  threshold?: number;
+  note?: string;
+  isActive?: boolean;
+}
+
+// Portfolio NAV history (dashboard performance chart)
+export type PortfolioHistoryPeriod = '1w' | '1m' | '3m' | '6m' | '1y';
+
+export interface PortfolioHistoryPoint {
+  date: string;
+  nav: number;
+  pnl: number;
+  pnl_pct: number;
+}
+
+export interface PortfolioHistoryResponse {
+  base_currency: Currency;
+  period: PortfolioHistoryPeriod;
+  points: PortfolioHistoryPoint[];
+}

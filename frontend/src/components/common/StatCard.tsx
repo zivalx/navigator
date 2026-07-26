@@ -21,7 +21,7 @@ export function StatCard({
   change,
   changeLabel,
   currency = 'USD',
-  compact = true,
+  compact,
   icon,
   tooltip,
   variant = 'default',

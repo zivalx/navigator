@@ -1,10 +1,11 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef } from 'react';
-import { MarketCard, MarketCardData, DataSource, defaultMarketCards } from '@/lib/marketCardTypes';
+import { MarketCard, MarketCardData, defaultMarketCards } from '@/lib/marketCardTypes';
 import { api } from '@/lib/api';
+import { useAppSettings } from '@/contexts/AppSettingsContext';
 
 interface MarketCardsContextType {
   cards: MarketCardData[];
-  addCard: (symbol: string, name: string, dataSource?: DataSource, region?: 'US' | 'EU' | 'ASIA') => void;
+  addCard: (symbol: string, name: string, region?: 'US' | 'EU' | 'ASIA') => void;
   removeCard: (id: string) => void;
   updateCard: (id: string, updates: Partial<MarketCard>) => void;
   reorderCards: (fromIndex: number, toIndex: number) => void;
@@ -23,6 +24,7 @@ export function MarketCardsProvider({ children }: { children: ReactNode }) {
   const [prices, setPrices] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string }>>({});
   const [isEditMode, setEditMode] = useState(false);
   const fetchingRef = useRef(false);
+  const { refreshIntervalMs } = useAppSettings();
 
   // Save to localStorage
   useEffect(() => {
@@ -55,12 +57,13 @@ export function MarketCardsProvider({ children }: { children: ReactNode }) {
     }
   }, [cards]);
 
-  // Fetch on mount and every 60s
+  // Fetch on mount, then at the user-configured interval (disabled when "Manual only" is selected)
   useEffect(() => {
     fetchPrices();
-    const interval = setInterval(fetchPrices, 60000);
+    if (refreshIntervalMs === false) return;
+    const interval = setInterval(fetchPrices, refreshIntervalMs);
     return () => clearInterval(interval);
-  }, [fetchPrices]);
+  }, [fetchPrices, refreshIntervalMs]);
 
   // Cards with real price data
   const cardsWithData: MarketCardData[] = cards
@@ -71,12 +74,11 @@ export function MarketCardsProvider({ children }: { children: ReactNode }) {
       lastUpdated: new Date(),
     }));
 
-  const addCard = useCallback((symbol: string, name: string, dataSource: DataSource = 'yahoo', region?: 'US' | 'EU' | 'ASIA') => {
+  const addCard = useCallback((symbol: string, name: string, region?: 'US' | 'EU' | 'ASIA') => {
     const newCard: MarketCard = {
       id: `card_${Date.now()}`,
       symbol: symbol.toUpperCase(),
       name,
-      dataSource,
       order: cards.length,
       region,
     };

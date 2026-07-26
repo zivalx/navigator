@@ -1,17 +1,8 @@
-import { useState } from 'react';
-import { TrendingUp, TrendingDown, X, GripVertical, Settings2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, X, GripVertical, ChevronLeft, ChevronRight } from 'lucide-react';
 import { PercentChange } from '@/components/common/PriceDisplay';
-import { MarketCardData, DataSource, dataSourceLabels } from '@/lib/marketCardTypes';
+import { MarketCardData } from '@/lib/marketCardTypes';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { useMarketCards } from '@/contexts/MarketCardsContext';
 
 interface MarketAssetCardProps {
@@ -21,12 +12,8 @@ interface MarketAssetCardProps {
 }
 
 export function MarketAssetCard({ card, isFirst, isLast }: MarketAssetCardProps) {
-  const { removeCard, updateCard, moveCard, isEditMode } = useMarketCards();
+  const { removeCard, moveCard, isEditMode } = useMarketCards();
   const isPositive = (card.changePercent ?? 0) >= 0;
-
-  const handleSourceChange = (source: DataSource) => {
-    updateCard(card.id, { dataSource: source });
-  };
 
   return (
     <div
@@ -70,42 +57,19 @@ export function MarketAssetCard({ card, isFirst, isLast }: MarketAssetCardProps)
           ) : (
             <TrendingDown className="h-5 w-5 text-destructive" />
           )}
-          
-          {/* Settings Dropdown */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
-              >
-                <Settings2 className="h-3.5 w-3.5" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel>Data Source</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {(Object.keys(dataSourceLabels) as DataSource[]).map((source) => (
-                <DropdownMenuItem
-                  key={source}
-                  onClick={() => handleSourceChange(source)}
-                  className={cn(card.dataSource === source && 'bg-accent')}
-                >
-                  {dataSourceLabels[source]}
-                  {card.dataSource === source && (
-                    <span className="ml-auto text-xs text-muted-foreground">✓</span>
-                  )}
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem 
-                className="text-destructive focus:text-destructive"
-                onClick={() => removeCard(card.id)}
-              >
-                Remove Card
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+
+          {/* Quick remove (outside edit mode) */}
+          {!isEditMode && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+              onClick={() => removeCard(card.id)}
+              title="Remove card"
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -117,36 +81,29 @@ export function MarketAssetCard({ card, isFirst, isLast }: MarketAssetCardProps)
         <PercentChange value={card.changePercent ?? 0} size="md" />
       </div>
 
-      {/* Data Source Badge */}
-      <div className="mt-3 flex items-center justify-between">
-        <span className="text-xs text-muted-foreground">
-          {dataSourceLabels[card.dataSource]}
-        </span>
-        
-        {/* Move Controls in Edit Mode */}
-        {isEditMode && (
-          <div className="flex gap-1">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-5 w-5"
-              onClick={() => moveCard(card.id, 'left')}
-              disabled={isFirst}
-            >
-              <ChevronLeft className="h-3 w-3" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-5 w-5"
-              onClick={() => moveCard(card.id, 'right')}
-              disabled={isLast}
-            >
-              <ChevronRight className="h-3 w-3" />
-            </Button>
-          </div>
-        )}
-      </div>
+      {/* Move Controls in Edit Mode */}
+      {isEditMode && (
+        <div className="mt-3 flex items-center justify-end gap-1">
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-5 w-5"
+            onClick={() => moveCard(card.id, 'left')}
+            disabled={isFirst}
+          >
+            <ChevronLeft className="h-3 w-3" />
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-5 w-5"
+            onClick={() => moveCard(card.id, 'right')}
+            disabled={isLast}
+          >
+            <ChevronRight className="h-3 w-3" />
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

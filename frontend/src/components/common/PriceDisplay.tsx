@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils';
+import { useAppSettings } from '@/contexts/AppSettingsContext';
 
 interface PriceDisplayProps {
   value: number;
@@ -119,9 +120,14 @@ interface CurrencyDisplayProps {
   className?: string;
 }
 
-export function CurrencyDisplay({ value, currency = 'USD', compact = false, size = 'md', className }: CurrencyDisplayProps) {
+export function CurrencyDisplay({ value, currency = 'USD', compact, size = 'md', className }: CurrencyDisplayProps) {
+  const { compactNumbers } = useAppSettings();
+  // Respect an explicit override from the caller; otherwise fall back to the
+  // user's global "Compact Number Format" setting.
+  const useCompact = compact ?? compactNumbers;
+
   const formatValue = () => {
-    if (compact) {
+    if (useCompact) {
       if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
       if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
       if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
