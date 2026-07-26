@@ -7,6 +7,7 @@ import {
   TrendingUp,
   Grid3X3,
   Settings,
+  Bell,
   Moon,
   Sun,
   RefreshCw
@@ -15,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { useTheme } from '@/contexts/ThemeContext';
 import { usePortfolio } from '@/contexts/PortfolioContext';
 import { GlobalSearch } from '@/components/common/GlobalSearch';
+import { AlertsBell } from '@/components/alerts/AlertsBell';
 import { cn } from '@/lib/utils';
 import {
   Sidebar,
@@ -37,6 +39,7 @@ const navItems = [
   { path: '/watchlist', label: 'Watchlist', icon: Star },
   { path: '/markets', label: 'Markets', icon: TrendingUp },
   { path: '/heatmap', label: 'Heatmap', icon: Grid3X3 },
+  { path: '/alerts', label: 'Alerts', icon: Bell },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -86,7 +89,7 @@ function AppSidebar() {
 
 function TopBar() {
   const { theme, toggleTheme } = useTheme();
-  const { refreshPrices, lastUpdated, isDemoMode } = usePortfolio();
+  const { refreshPrices, lastUpdated } = usePortfolio();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleRefresh = async () => {
@@ -106,16 +109,7 @@ function TopBar() {
   return (
     <header className="sticky top-0 z-40 glass-panel border-b border-border h-14 flex items-center px-4 gap-4">
       <SidebarTrigger />
-      
-      {/* Demo Banner */}
-      {isDemoMode && (
-        <div className="bg-warning/10 border border-warning/20 px-3 py-1 rounded-md">
-          <span className="text-xs text-warning font-medium">
-            🎭 Demo Mode
-          </span>
-        </div>
-      )}
-      
+
       <div className="flex-1" />
       
       {/* Search */}
@@ -133,6 +127,9 @@ function TopBar() {
           <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
         </Button>
       </div>
+
+      {/* Alerts Bell */}
+      <AlertsBell />
 
       {/* Theme Toggle */}
       <Button

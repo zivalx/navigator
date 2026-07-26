@@ -22,7 +22,7 @@ import {
   TableRow 
 } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Plus, Search, Trash2, Target, MessageSquare, MoreHorizontal, Star, Edit2, FolderPlus } from 'lucide-react';
+import { Plus, Search, Trash2, Target, MessageSquare, MoreHorizontal, Star, Edit2, FolderPlus, Bell } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +31,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { EmptyState } from '@/components/common/EmptyState';
+import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
+import type { WatchlistItemWithAsset } from '@/lib/types';
 import { toast } from 'sonner';
 
 export function WatchlistTable() {
@@ -64,6 +66,20 @@ export function WatchlistTable() {
   // Edit item dialog
   const [editItemDialogOpen, setEditItemDialogOpen] = useState(false);
   const [itemToEdit, setItemToEdit] = useState<{ id: string; symbol: string; notes: string; targetPrice: string } | null>(null);
+
+  // Add alert dialog state
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  const [alertAsset, setAlertAsset] = useState<AlertAssetContext | null>(null);
+
+  const openAlertDialog = (item: WatchlistItemWithAsset) => {
+    setAlertAsset({
+      assetId: item.assetId,
+      symbol: item.asset.symbol,
+      name: item.asset.name,
+      currentPrice: item.currentPrice,
+    });
+    setAlertDialogOpen(true);
+  };
 
   const activeWatchlist = watchlists.find(wl => wl.id === activeWatchlistId);
 
@@ -481,6 +497,9 @@ export function WatchlistTable() {
                         <DropdownMenuItem onClick={() => openEditItemDialog(item)}>
                           <Edit2 className="h-4 w-4 mr-2" /> Edit
                         </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openAlertDialog(item)}>
+                          <Bell className="h-4 w-4 mr-2" /> Add Alert
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => handleConvertToHolding(item)}>
                           <Plus className="h-4 w-4 mr-2" /> Add to Holdings
                         </DropdownMenuItem>
@@ -581,6 +600,13 @@ export function WatchlistTable() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Add Alert Dialog */}
+      <CreateAlertDialog
+        open={alertDialogOpen}
+        onOpenChange={setAlertDialogOpen}
+        asset={alertAsset ?? undefined}
+      />
     </div>
   );
 }

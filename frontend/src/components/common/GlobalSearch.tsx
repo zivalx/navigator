@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 interface SearchResult {
   symbol: string;
   name: string;
-  exchange: string;
+  exchange?: string;
   asset_type: string;
   currency: string;
   id?: string;

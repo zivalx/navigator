@@ -23,13 +23,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Search, MoreHorizontal, Pencil, Trash2, ChevronDown, ChevronRight, Calendar, Building2 } from 'lucide-react';
-import { 
+import { Search, MoreHorizontal, Pencil, Trash2, ChevronDown, ChevronRight, Calendar, Building2, Bell } from 'lucide-react';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
 import { cn } from '@/lib/utils';
 import { AssetType, MarketRegion, HoldingWithAsset, GroupedHolding } from '@/lib/types';
 import { format } from 'date-fns';
@@ -50,6 +51,20 @@ export function PortfolioTable() {
   const [editAvgCost, setEditAvgCost] = useState('');
   const [editAccountName, setEditAccountName] = useState('');
   const [editPurchaseDate, setEditPurchaseDate] = useState('');
+
+  // Add alert dialog state
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  const [alertAsset, setAlertAsset] = useState<AlertAssetContext | null>(null);
+
+  const openAlertDialog = (group: GroupedHolding) => {
+    setAlertAsset({
+      assetId: group.assetId,
+      symbol: group.asset.symbol,
+      name: group.asset.name,
+      currentPrice: group.currentPrice,
+    });
+    setAlertDialogOpen(true);
+  };
 
   // Get unique locations from all holdings
   const allLocations = useMemo(() => {
@@ -387,7 +402,10 @@ export function PortfolioTable() {
                                     <DropdownMenuItem onClick={() => openEditDialog(lot)}>
                                       <Pencil className="h-4 w-4 mr-2" /> Edit Lot
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem 
+                                    <DropdownMenuItem onClick={() => openAlertDialog(group)}>
+                                      <Bell className="h-4 w-4 mr-2" /> Add Alert
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
                                       className="text-destructive"
                                       onClick={() => removeHolding(lot.id)}
                                     >
@@ -472,6 +490,13 @@ export function PortfolioTable() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Add Alert Dialog */}
+      <CreateAlertDialog
+        open={alertDialogOpen}
+        onOpenChange={setAlertDialogOpen}
+        asset={alertAsset ?? undefined}
+      />
     </div>
   );
 }

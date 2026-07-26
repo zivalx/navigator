@@ -74,12 +74,3 @@ export function AlertBanner({ type, title, message, action, onDismiss, className
   );
 }
 
-export function DemoBanner() {
-  return (
-    <AlertBanner
-      type="warning"
-      title="Demo Mode"
-      message="Showing simulated prices. Connect a data provider for live quotes."
-    />
-  );
-}

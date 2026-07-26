@@ -1,3 +1,14 @@
+import type {
+  Currency,
+  IndicatorsResponse,
+  PortfolioHistoryPeriod,
+  PortfolioHistoryResponse,
+  PriceAlert,
+  PriceAlertStatus,
+  CreatePriceAlertPayload,
+  UpdatePriceAlertPayload,
+} from "./types";
+
 const BASE = "/api";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -20,13 +31,20 @@ export const api = {
     request<any>("/assets/", { method: "POST", body: JSON.stringify(data) }),
 
   // Portfolio
-  getHoldings: () => request<any[]>("/portfolio/holdings"),
+  getSummary: (baseCurrency: Currency = "USD") =>
+    request<any>(`/portfolio/summary?base_currency=${baseCurrency}`),
+  getHoldings: (baseCurrency: Currency = "USD") =>
+    request<any[]>(`/portfolio/holdings?base_currency=${baseCurrency}`),
+  getGroupedHoldings: (baseCurrency: Currency = "USD") =>
+    request<any[]>(`/portfolio/holdings/grouped?base_currency=${baseCurrency}`),
   createHolding: (data: any) =>
     request<any>("/portfolio/holdings", { method: "POST", body: JSON.stringify(data) }),
   updateHolding: (id: string, data: any) =>
     request<any>(`/portfolio/holdings/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteHolding: (id: string) =>
     request<void>(`/portfolio/holdings/${id}`, { method: "DELETE" }),
+  getPortfolioHistory: (period: PortfolioHistoryPeriod = "3m", baseCurrency: Currency = "USD") =>
+    request<PortfolioHistoryResponse>(`/portfolio/history?period=${period}&base_currency=${baseCurrency}`),
 
   // Watchlists
   getWatchlists: () => request<any[]>("/watchlist/"),
@@ -54,6 +72,76 @@ export const api = {
   getTopGainers: (limit = 5) => request<any[]>(`/markets/movers/gainers?limit=${limit}`),
   getTopLosers: (limit = 5) => request<any[]>(`/markets/movers/losers?limit=${limit}`),
 
+  // Indicators (Fear & Greed, VIX, indices, rates, fx, commodities, crypto, breadth)
+  getIndicators: (keys?: string[]) =>
+    request<IndicatorsResponse>(
+      `/markets/indicators${keys && keys.length ? `?keys=${keys.join(",")}` : ""}`
+    ),
+
   // News
   getNews: () => request<any[]>("/news"),
+
+  // Price alerts (docs/superpowers/specs/2026-07-23-price-alerts-design.md)
+  getAlerts: (status?: PriceAlertStatus) =>
+    request<RawPriceAlert[]>(`/alerts/${status ? `?status=${status}` : ""}`).then((rows) =>
+      rows.map(mapPriceAlert)
+    ),
+  createAlert: (data: CreatePriceAlertPayload) =>
+    request<RawPriceAlert>("/alerts/", {
+      method: "POST",
+      body: JSON.stringify({
+        assetId: data.assetId,
+        symbol: data.symbol,
+        rule: data.rule,
+        threshold: data.threshold,
+        note: data.note,
+      }),
+    }).then(mapPriceAlert),
+  updateAlert: (id: string, data: UpdatePriceAlertPayload) =>
+    request<RawPriceAlert>(`/alerts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        rule: data.rule,
+        threshold: data.threshold,
+        note: data.note,
+        isActive: data.isActive,
+      }),
+    }).then(mapPriceAlert),
+  deleteAlert: (id: string) => request<void>(`/alerts/${id}`, { method: "DELETE" }),
+  acknowledgeAlert: (id: string) =>
+    request<RawPriceAlert>(`/alerts/${id}/acknowledge`, { method: "POST" }).then(mapPriceAlert),
 };
+
+// The alerts backend follows the codebase's existing camelCase API convention
+// (same as watchlist/asset endpoints); only the date fields need string -> Date.
+interface RawPriceAlert {
+  id: string;
+  assetId: string;
+  symbol: string;
+  name: string;
+  rule: PriceAlert["rule"];
+  threshold: number;
+  note: string | null;
+  isActive: boolean;
+  createdAt: string;
+  triggeredAt: string | null;
+  triggeredPrice: number | null;
+  acknowledgedAt: string | null;
+}
+
+function mapPriceAlert(raw: RawPriceAlert): PriceAlert {
+  return {
+    id: raw.id,
+    assetId: raw.assetId,
+    symbol: raw.symbol,
+    name: raw.name,
+    rule: raw.rule,
+    threshold: Number(raw.threshold),
+    note: raw.note ?? undefined,
+    isActive: raw.isActive,
+    createdAt: new Date(raw.createdAt),
+    triggeredAt: raw.triggeredAt ? new Date(raw.triggeredAt) : null,
+    triggeredPrice: raw.triggeredPrice ?? null,
+    acknowledgedAt: raw.acknowledgedAt ? new Date(raw.acknowledgedAt) : null,
+  };
+}
