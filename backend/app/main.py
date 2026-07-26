@@ -65,10 +65,11 @@ async def health():
 
 
 # Import and include routers
-from .routers import assets, portfolio, watchlist, markets, news
+from .routers import assets, portfolio, watchlist, markets, news, alerts
 
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
 app.include_router(markets.router, prefix="/api/markets", tags=["markets"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
+app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     quote_cache_ttl: int = 60
     news_cache_ttl: int = 900
     fx_cache_ttl: int = 3600
+    indicators_cache_ttl: int = 900
 
     @property
     def cors_origins_list(self) -> List[str]:

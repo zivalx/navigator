@@ -4,6 +4,8 @@ from .finnhub import FinnhubProvider
 from .coingecko import CoinGeckoProvider
 from .yahoo import YahooFinanceProvider
 from .alphavantage import AlphaVantageProvider
+from .cnn import CNNFearGreedProvider
+from .alternative_me import AlternativeMeFearGreedProvider
 
 __all__ = [
     "BaseProvider",
@@ -12,4 +14,6 @@ __all__ = [
     "CoinGeckoProvider",
     "YahooFinanceProvider",
     "AlphaVantageProvider",
+    "CNNFearGreedProvider",
+    "AlternativeMeFearGreedProvider",
 ]

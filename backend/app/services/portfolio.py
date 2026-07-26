@@ -1,7 +1,8 @@
 import logging
 from typing import List, Optional
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time, date as date_cls
 
 from ..models.holding import HoldingLot
 from ..models.asset import Asset
@@ -13,6 +14,23 @@ from .market_data import MarketDataService
 from .fx import FxService
 
 logger = logging.getLogger(__name__)
+
+# Lookback window (in calendar days) for each supported history period.
+HISTORY_PERIOD_DAYS = {
+    "1w": 7,
+    "1m": 30,
+    "3m": 90,
+    "6m": 182,
+    "1y": 365,
+}
+DEFAULT_HISTORY_PERIOD = "3m"
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    """Treat naive datetimes as UTC so comparisons with tz-aware datetimes are safe."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class PortfolioService:
@@ -83,7 +101,7 @@ class PortfolioService:
 
             except Exception as e:
                 # If we can't get current price, just return without market data
-                print(f"Error getting price for {holding.asset.symbol}: {e}")
+                logger.warning("Error getting price for %s: %s", holding.asset.symbol, e)
 
             result.append(HoldingWithAsset(**holding_dict))
 
@@ -155,22 +173,45 @@ class PortfolioService:
 
         return result
 
-    async def _get_nav_at_date(self, target_date: datetime) -> Optional[float]:
+    async def _get_nav_at_date(
+        self,
+        target_date: datetime,
+        holdings: Optional[List[HoldingLot]] = None,
+    ) -> Optional[float]:
         """
         Calculate portfolio NAV at a historical date using price snapshots.
 
+        This is the SHARED valuation helper used by both `get_summary()`
+        (daily/weekly/monthly P&L) and `get_nav_history()` (the history
+        chart). There is only one at-date valuation method — do not
+        duplicate this logic elsewhere.
+
         For each held asset, finds the most recent PriceSnapshot on or before
         target_date, converts to base currency, and sums price * quantity.
-        Returns None if no historical price data is available for any asset.
+        A lot only contributes from its `purchase_date` onward — lots
+        purchased after `target_date` are excluded.
+        Returns None if no historical price data is available for any
+        (already-purchased) asset.
+
+        `holdings` can be passed in to avoid re-querying the DB when this is
+        called repeatedly across many dates (see `get_nav_history`).
         """
-        holdings = self.db.query(HoldingLot).all()
+        if holdings is None:
+            holdings = self.db.query(HoldingLot).all()
         if not holdings:
             return None
+
+        target_date = _ensure_aware(target_date)
 
         total_nav = 0.0
         has_any_price = False
 
         for holding in holdings:
+            purchase_date = holding.purchase_date
+            if purchase_date is not None and _ensure_aware(purchase_date) > target_date:
+                # Lot not yet purchased as of target_date - excluded from NAV.
+                continue
+
             # Find the closest price snapshot on or before the target date
             snapshot = (
                 self.db.query(PriceSnapshot)
@@ -199,6 +240,83 @@ class PortfolioService:
             total_nav += price_base * holding.quantity
 
         return total_nav if has_any_price else None
+
+    async def get_nav_history(self, period: str = DEFAULT_HISTORY_PERIOD) -> dict:
+        """
+        Build the NAV time series for the dashboard performance chart.
+
+        Reuses `_get_nav_at_date` (the same at-date valuation method used by
+        `get_summary()`) for every date in the period that actually has a
+        price snapshot. Dates with no snapshot (weekends/holidays) are
+        simply absent - no forward-fill.
+
+        `pnl`/`pnl_pct` are relative to the first point in the series.
+        """
+        days = HISTORY_PERIOD_DAYS.get(period, HISTORY_PERIOD_DAYS[DEFAULT_HISTORY_PERIOD])
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=days)
+
+        holdings = self.db.query(HoldingLot).all()
+        if not holdings:
+            return {
+                "base_currency": self.base_currency.value,
+                "period": period,
+                "points": [],
+            }
+
+        asset_ids = {holding.asset_id for holding in holdings}
+
+        # Union of all calendar dates that have a price snapshot for any
+        # currently held asset within the requested window.
+        date_rows = (
+            self.db.query(func.date(PriceSnapshot.timestamp))
+            .filter(
+                PriceSnapshot.asset_id.in_(asset_ids),
+                PriceSnapshot.timestamp >= start,
+                PriceSnapshot.timestamp <= now,
+            )
+            .distinct()
+            .order_by(func.date(PriceSnapshot.timestamp))
+            .all()
+        )
+
+        points = []
+        first_nav = None
+
+        for (raw_date,) in date_rows:
+            if isinstance(raw_date, str):
+                day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            elif isinstance(raw_date, datetime):
+                day = raw_date.date()
+            elif isinstance(raw_date, date_cls):
+                day = raw_date
+            else:
+                continue
+
+            target_dt = datetime.combine(day, dt_time(23, 59, 59), tzinfo=timezone.utc)
+            nav = await self._get_nav_at_date(target_dt, holdings=holdings)
+
+            if nav is None:
+                continue
+
+            if first_nav is None:
+                first_nav = nav
+
+            pnl = nav - first_nav
+            pnl_pct = (pnl / first_nav * 100) if first_nav else 0.0
+
+            points.append({
+                "date": day.isoformat(),
+                "nav": nav,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            })
+
+        return {
+            "base_currency": self.base_currency.value,
+            "period": period,
+            "points": points,
+        }
 
     async def get_summary(self) -> PortfolioSummary:
         """Calculate portfolio summary with daily, weekly, and monthly P&L."""
