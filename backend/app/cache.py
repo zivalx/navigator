@@ -32,15 +32,15 @@ class Cache:
             return json.loads(value)
         return None
 
-    async def set(self, key: str, value: Any, ttl: int = 60):
-        """Set value in cache with TTL."""
+    async def set(self, key: str, value: Any, ttl: Optional[int] = 60):
+        """Set value in cache with TTL. Pass ttl=None to store without expiry."""
         if not self.redis:
             return
-        await self.redis.setex(
-            key,
-            ttl,
-            json.dumps(value, default=str),
-        )
+        payload = json.dumps(value, default=str)
+        if ttl is None:
+            await self.redis.set(key, payload)
+        else:
+            await self.redis.setex(key, ttl, payload)
 
     async def delete(self, key: str):
         """Delete key from cache."""

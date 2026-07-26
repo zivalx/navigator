@@ -126,12 +126,45 @@ Backend API for Navigator - A customizable personal finance hub consolidating as
 - `GET /api/markets/quotes?symbols=AAPL,GOOGL` - Get multiple quotes
 - `GET /api/markets/movers/gainers` - Top gaining stocks
 - `GET /api/markets/movers/losers` - Top losing stocks
+- `GET /api/markets/indicators?keys=vix,sp500,...` - Market indicators strip: CNN/Crypto Fear & Greed, VIX, major indices, US 10Y/30Y yields, S&P 500 breadth (% above 50/200-day MA), DXY, gold, WTI, BTC. `keys` optional (comma-separated; omitted = all, unknown keys ignored). Never 500s — a failing indicator comes back with `value: null` and `error` set.
 
 ### News
 - `GET /api/news` - Latest news
 - `GET /api/news?asset_id={id}` - News for specific asset
 - `GET /api/news/symbols/{symbol}` - News for symbol
 - `GET /api/news/sync` - Trigger news sync
+
+### Alerts
+
+Price alerts / stop-loss rules, evaluated in the background every 5 minutes.
+See `docs/superpowers/specs/2026-07-23-price-alerts-design.md` for the full design.
+
+- `GET /api/alerts` - List all alerts, joined with asset symbol/name. Optional `?status=active|triggered|unacknowledged` filter.
+- `POST /api/alerts` - Create an alert. Body: `{ assetId | symbol, rule: "price_below" | "price_above", threshold, note? }`. When `symbol` is given and no matching asset exists yet, a minimal asset record is created (best-effort enriched with currency from a live quote).
+- `PUT /api/alerts/{id}` - Edit `rule` / `threshold` / `note`. Setting `isActive: true` reactivates a triggered alert, clearing `triggeredAt` / `triggeredPrice` / `acknowledgedAt` so it can fire again (one-shot re-arm).
+- `DELETE /api/alerts/{id}` - Delete an alert.
+- `POST /api/alerts/{id}/acknowledge` - Mark a triggered alert as acknowledged (idempotent).
+
+**Evaluation**: an APScheduler job (`price_alert_evaluation`, every 5 minutes) loads all active alerts, batch-fetches quotes via `MarketDataService.get_quotes()` (riding the 60s quote cache), and triggers on `price <= threshold` for `price_below` or `price >= threshold` for `price_above` (boundary inclusive). A triggered alert gets `isActive=false`, `triggeredAt`, `triggeredPrice` set and won't fire again unless reactivated. Alerts are one-shot in v1 — no email/push, no %-change or indicator-based rules, no market-hours logic (crypto triggers 24/7; equities just won't move off-hours).
+
+Example requests:
+```bash
+# Create a stop-loss by symbol (asset auto-created if unknown)
+curl -X POST http://localhost:8000/api/alerts \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "rule": "price_below", "threshold": 180, "note": "stop loss"}'
+
+# List unacknowledged (triggered but not yet seen) alerts
+curl http://localhost:8000/api/alerts?status=unacknowledged
+
+# Acknowledge one
+curl -X POST http://localhost:8000/api/alerts/{id}/acknowledge
+
+# Reactivate a triggered alert
+curl -X PUT http://localhost:8000/api/alerts/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"isActive": true}'
+```
 
 ## Database Schema
 
@@ -144,6 +177,7 @@ Backend API for Navigator - A customizable personal finance hub consolidating as
 - `price_snapshots` - Historical price data
 - `fx_rates` - Foreign exchange rates
 - `news_items` - News articles with sentiment
+- `price_alerts` - Price alerts / stop-loss rules (see [Alerts](#alerts))
 
 ## Caching Strategy
 
@@ -159,6 +193,11 @@ Backend API for Navigator - A customizable personal finance hub consolidating as
 ### FX Cache
 - **TTL**: 1 hour
 - **Key**: `fx:{FROM}:{TO}`
+
+### Indicators Cache
+- **TTL**: 15 minutes (`indicators_cache_ttl`) for the two sentiment fetches (CNN, alternative.me); Yahoo-backed indicators ride the existing 60s quote cache
+- **Key**: `indicators:{key}` (e.g. `indicators:fear_greed_stocks`)
+- **Breadth (S5FI/S5TH)**: computed by a background scheduler job (never inline), cached in Redis under `breadth:s5fi` / `breadth:s5th` without expiry
 
 ## API Rate Limits
 

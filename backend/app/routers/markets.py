@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from ..database import get_db
 from ..services.market_data import MarketDataService
+from ..services.indicators import IndicatorsService
 
 router = APIRouter()
 
@@ -58,3 +59,22 @@ async def get_top_losers(
     """Get top losing stocks."""
     market_service = MarketDataService(db)
     return await market_service.get_top_losers(limit, region)
+
+
+@router.get("/indicators")
+async def get_indicators(keys: Optional[str] = Query(None)):
+    """
+    Get market indicators (sentiment, volatility, indices, rates, breadth,
+    fx, commodities, crypto). Optional `keys` is a comma-separated list of
+    indicator keys; unknown keys are silently ignored. Omitted/empty = all.
+
+    Never 500s because one source is down — a failing indicator is returned
+    with value=null and error set.
+    """
+    key_list = [k.strip() for k in keys.split(",") if k.strip()] if keys else None
+
+    indicators_service = IndicatorsService()
+    try:
+        return await indicators_service.get_indicators(key_list)
+    finally:
+        await indicators_service.close()

@@ -31,7 +31,7 @@ docker-compose up -d
 docker-compose exec api python seed.py
 ```
 
-Verify: open http://localhost:8000/docs — you should see the Swagger UI.
+Verify: open http://localhost:7000/docs — you should see the Swagger UI.
 
 ### 2. Start Frontend
 
@@ -41,7 +41,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 — Navigator is running.
+Open http://localhost:7070 — Navigator is running.
 
 ### 3. Add Your Real Holdings
 
@@ -53,7 +53,7 @@ The seed script creates sample data. To add your actual portfolio:
 
 ```bash
 # Step 1: Add an asset (if not already seeded)
-curl -X POST http://localhost:8000/api/assets/ \
+curl -X POST http://localhost:7000/api/assets/ \
   -H "Content-Type: application/json" \
   -d '{
     "symbol": "JPM",
@@ -66,7 +66,7 @@ curl -X POST http://localhost:8000/api/assets/ \
   }'
 
 # Step 2: Add a holding (use the asset_id from step 1)
-curl -X POST http://localhost:8000/api/portfolio/holdings \
+curl -X POST http://localhost:7000/api/portfolio/holdings \
   -H "Content-Type: application/json" \
   -d '{
     "asset_id": "<asset-id-from-above>",
@@ -117,7 +117,7 @@ navigator/
 
 ## API Docs
 
-With the backend running: http://localhost:8000/docs
+With the backend running: http://localhost:7000/docs
 
 See [backend/README.md](backend/README.md) for full API reference.
 

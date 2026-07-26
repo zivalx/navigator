@@ -163,15 +163,15 @@ uvicorn app.main:app --reload
 
 ### Step 4: Test the API
 
-- **Health Check**: http://localhost:8000/health
-- **API Docs**: http://localhost:8000/docs
-- **Portfolio Summary**: http://localhost:8000/api/portfolio/summary
+- **Health Check**: http://localhost:7000/health
+- **API Docs**: http://localhost:7000/docs
+- **Portfolio Summary**: http://localhost:7000/api/portfolio/summary
 
 ## 📊 API Examples
 
 ### Get Quote
 ```bash
-curl http://localhost:8000/api/markets/quote/AAPL
+curl http://localhost:7000/api/markets/quote/AAPL
 ```
 
 Response:
@@ -188,12 +188,12 @@ Response:
 
 ### Portfolio Summary
 ```bash
-curl http://localhost:8000/api/portfolio/summary
+curl http://localhost:7000/api/portfolio/summary
 ```
 
 ### Add Holding
 ```bash
-curl -X POST http://localhost:8000/api/portfolio/holdings \
+curl -X POST http://localhost:7000/api/portfolio/holdings \
   -H "Content-Type: application/json" \
   -d '{
     "assetId": "...",
@@ -207,7 +207,7 @@ curl -X POST http://localhost:8000/api/portfolio/holdings \
 
 ### Sync News
 ```bash
-curl http://localhost:8000/api/news/sync
+curl http://localhost:7000/api/news/sync
 ```
 
 ## 🔧 Configuration
