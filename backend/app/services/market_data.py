@@ -102,10 +102,14 @@ class MarketDataService:
 
             return quote
         else:
-            # All providers failed - try to return last known price from DB
-            last_price = self.db.query(PriceSnapshot).filter(
-                PriceSnapshot.asset_id == symbol
-            ).order_by(PriceSnapshot.timestamp.desc()).first()
+            # All providers failed - try to return last known price from DB.
+            # PriceSnapshot.asset_id is the Asset UUID, not the ticker, so
+            # resolve through the asset row (already looked up above).
+            last_price = None
+            if asset:
+                last_price = self.db.query(PriceSnapshot).filter(
+                    PriceSnapshot.asset_id == asset.id
+                ).order_by(PriceSnapshot.timestamp.desc()).first()
 
             if last_price:
                 logger.warning("FALLBACK [%s]: all providers failed, returning DB cached price. Errors: %s", symbol, "; ".join(errors))

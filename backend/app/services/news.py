@@ -2,11 +2,14 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import httpx
+import logging
 import uuid
 
 from ..models.news import NewsItem
 from ..models.asset import Asset
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class NewsService:
@@ -47,7 +50,7 @@ class NewsService:
         Returns number of new articles added.
         """
         if not settings.marketaux_api_key:
-            print("⚠️ Marketaux API key not configured, skipping news sync")
+            logger.warning("Marketaux API key not configured, skipping news sync")
             return 0
 
         try:
@@ -109,11 +112,11 @@ class NewsService:
                 count += 1
 
             self.db.commit()
-            print(f"✅ Synced {count} news articles")
+            logger.info("Synced %d news articles", count)
             return count
 
         except Exception as e:
-            print(f"❌ Error syncing news: {e}")
+            logger.error("Error syncing news: %s", e)
             self.db.rollback()
             return 0
 
