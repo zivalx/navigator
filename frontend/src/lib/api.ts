@@ -94,6 +94,9 @@ export const api = {
         symbol: data.symbol,
         rule: data.rule,
         threshold: data.threshold,
+        intent: data.intent,
+        trailPercent: data.trailPercent,
+        trailAmount: data.trailAmount,
         note: data.note,
       }),
     }).then(mapPriceAlert),
@@ -103,6 +106,9 @@ export const api = {
       body: JSON.stringify({
         rule: data.rule,
         threshold: data.threshold,
+        intent: data.intent,
+        trailPercent: data.trailPercent,
+        trailAmount: data.trailAmount,
         note: data.note,
         isActive: data.isActive,
       }),
@@ -120,7 +126,12 @@ interface RawPriceAlert {
   symbol: string;
   name: string;
   rule: PriceAlert["rule"];
-  threshold: number;
+  threshold: number | null;
+  intent: PriceAlert["intent"];
+  trailPercent: number | null;
+  trailAmount: number | null;
+  highWaterMark: number | null;
+  currentStopPrice: number | null;
   note: string | null;
   isActive: boolean;
   createdAt: string;
@@ -136,7 +147,12 @@ function mapPriceAlert(raw: RawPriceAlert): PriceAlert {
     symbol: raw.symbol,
     name: raw.name,
     rule: raw.rule,
-    threshold: Number(raw.threshold),
+    threshold: raw.threshold != null ? Number(raw.threshold) : null,
+    intent: raw.intent ?? null,
+    trailPercent: raw.trailPercent ?? null,
+    trailAmount: raw.trailAmount ?? null,
+    highWaterMark: raw.highWaterMark ?? null,
+    currentStopPrice: raw.currentStopPrice ?? null,
     note: raw.note ?? undefined,
     isActive: raw.isActive,
     createdAt: new Date(raw.createdAt),

@@ -31,7 +31,7 @@ import {
 import { EmptyState } from '@/components/common/EmptyState';
 import { TableRowSkeleton } from '@/components/common/LoadingSkeleton';
 import { CreateAlertDialog } from '@/components/alerts/CreateAlertDialog';
-import { formatMoney, ruleVerb } from '@/components/alerts/alertUtils';
+import { formatMoney, formatTrail, ruleVerb } from '@/components/alerts/alertUtils';
 import { api } from '@/lib/api';
 import type { PriceAlert } from '@/lib/types';
 
@@ -44,6 +44,38 @@ function statusBadge(alert: PriceAlert) {
     );
   }
   return alert.isActive ? <Badge variant="outline">Active</Badge> : <Badge variant="secondary">Inactive</Badge>;
+}
+
+function intentBadge(alert: PriceAlert) {
+  const intent = alert.intent ?? (alert.rule === 'trailing_stop' ? 'sell' : null);
+  if (intent === 'buy') {
+    return <Badge className="bg-success/15 text-success hover:bg-success/15">Buy</Badge>;
+  }
+  if (intent === 'sell') {
+    return <Badge className="bg-destructive/15 text-destructive hover:bg-destructive/15">Sell</Badge>;
+  }
+  return <span className="text-muted-foreground text-sm">—</span>;
+}
+
+/** Rule description cell: "Price below" or "Trailing stop 8% · high $327.50" */
+function ruleCell(alert: PriceAlert) {
+  if (alert.rule !== 'trailing_stop') return <>Price {ruleVerb(alert.rule)}</>;
+  return (
+    <>
+      Trailing stop {formatTrail(alert)}
+      {alert.isActive && alert.highWaterMark != null && (
+        <span className="block text-xs">high {formatMoney(alert.highWaterMark)}</span>
+      )}
+    </>
+  );
+}
+
+/** Level cell: static threshold, or the current derived stop for a TSL. */
+function levelCell(alert: PriceAlert) {
+  if (alert.rule !== 'trailing_stop') {
+    return alert.threshold != null ? formatMoney(alert.threshold) : '—';
+  }
+  return alert.currentStopPrice != null ? formatMoney(alert.currentStopPrice) : '—';
 }
 
 const Alerts = () => {
@@ -92,7 +124,7 @@ const Alerts = () => {
             <Table>
               <TableBody>
                 {Array.from({ length: 4 }).map((_, i) => (
-                  <TableRowSkeleton key={i} columns={6} />
+                  <TableRowSkeleton key={i} columns={8} />
                 ))}
               </TableBody>
             </Table>
@@ -114,7 +146,8 @@ const Alerts = () => {
                 <TableRow className="bg-muted/30 hover:bg-muted/30">
                   <TableHead>Asset</TableHead>
                   <TableHead>Rule</TableHead>
-                  <TableHead className="text-right">Threshold</TableHead>
+                  <TableHead className="text-right">Level</TableHead>
+                  <TableHead>Action</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Note</TableHead>
                   <TableHead>Created</TableHead>
@@ -128,8 +161,9 @@ const Alerts = () => {
                       <span className="font-semibold">{alert.symbol}</span>
                       {alert.name && <span className="ml-1.5 text-sm text-muted-foreground">{alert.name}</span>}
                     </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">Price {ruleVerb(alert.rule)}</TableCell>
-                    <TableCell className="text-right font-mono">{formatMoney(alert.threshold)}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{ruleCell(alert)}</TableCell>
+                    <TableCell className="text-right font-mono">{levelCell(alert)}</TableCell>
+                    <TableCell>{intentBadge(alert)}</TableCell>
                     <TableCell>{statusBadge(alert)}</TableCell>
                     <TableCell>
                       {alert.note ? (

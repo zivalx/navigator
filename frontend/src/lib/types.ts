@@ -185,8 +185,10 @@ export interface IndicatorsResponse {
   indicators: MarketIndicator[];
 }
 
-// Price alerts / stop-loss (spec: docs/superpowers/specs/2026-07-23-price-alerts-design.md)
-export type PriceAlertRule = 'price_below' | 'price_above';
+// Price alerts / stop-loss (specs: docs/superpowers/specs/2026-07-23-price-alerts-design.md,
+// docs/superpowers/specs/2026-08-12-trailing-stop-alerts-design.md)
+export type PriceAlertRule = 'price_below' | 'price_above' | 'trailing_stop';
+export type PriceAlertIntent = 'buy' | 'sell';
 export type PriceAlertStatus = 'active' | 'triggered' | 'unacknowledged';
 
 export interface PriceAlert {
@@ -195,7 +197,12 @@ export interface PriceAlert {
   symbol: string;
   name: string;
   rule: PriceAlertRule;
-  threshold: number;
+  threshold: number | null;
+  intent?: PriceAlertIntent | null;
+  trailPercent?: number | null;
+  trailAmount?: number | null;
+  highWaterMark?: number | null;
+  currentStopPrice?: number | null;
   note?: string;
   isActive: boolean;
   createdAt: Date;
@@ -208,13 +215,20 @@ export interface CreatePriceAlertPayload {
   assetId?: string;
   symbol?: string;
   rule: PriceAlertRule;
-  threshold: number;
+  threshold?: number;
+  intent?: PriceAlertIntent;
+  trailPercent?: number;
+  trailAmount?: number;
   note?: string;
 }
 
 export interface UpdatePriceAlertPayload {
   rule?: PriceAlertRule;
-  threshold?: number;
+  // null explicitly clears a field (e.g. switching a trail from % to $).
+  threshold?: number | null;
+  intent?: PriceAlertIntent;
+  trailPercent?: number | null;
+  trailAmount?: number | null;
   note?: string;
   isActive?: boolean;
 }

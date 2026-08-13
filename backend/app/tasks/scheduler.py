@@ -13,6 +13,7 @@ from ..models.holding import HoldingLot
 from ..models.price import PriceSnapshot
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
+from ..services.notifications import NotificationService, format_alert_message
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,9 @@ async def evaluate_price_alerts() -> None:
     for price_above — boundary inclusive). Triggered alerts are marked
     is_active=False with triggered_at/triggered_price recorded; they don't
     fire again unless reactivated via the API.
+
+    The notification pass runs even when no alerts are active, so deliveries
+    that failed on a previous cycle are still retried.
     """
     db = SessionLocal()
     try:
@@ -206,10 +210,12 @@ async def evaluate_price_alerts() -> None:
             .all()
         )
         if not alerts:
+            await notify_triggered_alerts(db)
             return
 
         symbols = sorted({a.asset.symbol for a in alerts if a.asset})
         if not symbols:
+            await notify_triggered_alerts(db)
             return
 
         market_service = MarketDataService(db)
@@ -217,9 +223,11 @@ async def evaluate_price_alerts() -> None:
             quotes = await market_service.get_quotes(symbols)
         except Exception as e:
             logger.error("Price alert evaluation: quote fetch failed: %s", e)
+            await notify_triggered_alerts(db)
             return
 
         triggered_count = 0
+        dirty = False
         for alert in alerts:
             if not alert.asset:
                 continue
@@ -229,26 +237,76 @@ async def evaluate_price_alerts() -> None:
                 continue
 
             price = quote["price"]
-            hit = (
-                (alert.rule == AlertRule.PRICE_BELOW and price <= alert.threshold)
-                or (alert.rule == AlertRule.PRICE_ABOVE and price >= alert.threshold)
-            )
+
+            if alert.rule == AlertRule.TRAILING_STOP:
+                # Ratchet the high-water mark up, never down. Legacy alerts
+                # without a mark start tracking from the current price.
+                if alert.high_water_mark is None or price > alert.high_water_mark:
+                    alert.high_water_mark = price
+                    dirty = True
+                stop = alert.stop_price
+                hit = stop is not None and price <= stop
+            else:
+                hit = (
+                    (alert.rule == AlertRule.PRICE_BELOW and price <= alert.threshold)
+                    or (alert.rule == AlertRule.PRICE_ABOVE and price >= alert.threshold)
+                )
             if hit:
                 alert.is_active = False
                 alert.triggered_at = datetime.now(timezone.utc)
                 alert.triggered_price = price
                 triggered_count += 1
+                dirty = True
 
-        if triggered_count:
+        if dirty:
             db.commit()
+        if triggered_count:
             logger.info(
                 "Price alert evaluation: %d alert(s) triggered", triggered_count
             )
+
+        await notify_triggered_alerts(db)
     except Exception as e:
         db.rollback()
         logger.error("Price alert evaluation job error: %s", e)
     finally:
         db.close()
+
+
+async def notify_triggered_alerts(db) -> None:
+    """Send Telegram messages for triggered-but-unnotified alerts.
+
+    Picks up alerts whose delivery failed on a previous cycle too, so a
+    network blip delays a message by one cycle instead of losing it. When no
+    Telegram channel is configured, alerts are marked handled so a backlog
+    doesn't build up (and then blast out if a bot is configured later).
+    Notification errors never propagate into the evaluation loop.
+    """
+    pending = (
+        db.query(PriceAlert)
+        .filter(
+            PriceAlert.triggered_at.isnot(None),
+            PriceAlert.notified_at.is_(None),
+        )
+        .all()
+    )
+    if not pending:
+        return
+
+    service = NotificationService()
+    for alert in pending:
+        try:
+            if service.enabled:
+                sent = await service.send(format_alert_message(alert))
+                if not sent:
+                    continue  # retry next cycle
+            alert.notified_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning(
+                "Alert notification failed for %s: %s", alert.id, e
+            )
 
 
 def start_scheduler() -> None:

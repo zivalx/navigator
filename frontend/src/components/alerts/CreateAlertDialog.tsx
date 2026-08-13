@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import type { PriceAlert, PriceAlertRule } from '@/lib/types';
+import type { PriceAlert, PriceAlertIntent, PriceAlertRule } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { formatMoney } from './alertUtils';
 
 export interface AlertAssetContext {
   assetId?: string;
@@ -33,6 +34,8 @@ interface CreateAlertDialogProps {
 }
 
 type SearchResult = { id?: string; symbol: string; name?: string };
+type TrailType = 'percent' | 'amount';
+type IntentChoice = 'none' | PriceAlertIntent;
 
 export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: CreateAlertDialogProps) {
   const queryClient = useQueryClient();
@@ -44,8 +47,13 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [rule, setRule] = useState<PriceAlertRule>('price_below');
   const [threshold, setThreshold] = useState('');
+  const [trailType, setTrailType] = useState<TrailType>('percent');
+  const [trailValue, setTrailValue] = useState('');
+  const [intent, setIntent] = useState<IntentChoice>('none');
   const [note, setNote] = useState('');
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
+
+  const isTrailing = rule === 'trailing_stop';
 
   // (Re)initialize fields every time the dialog is opened.
   useEffect(() => {
@@ -53,17 +61,24 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
     if (editAlert) {
       setSelectedAsset({ assetId: editAlert.assetId, symbol: editAlert.symbol, name: editAlert.name });
       setRule(editAlert.rule);
-      setThreshold(editAlert.threshold.toString());
+      setThreshold(editAlert.threshold != null ? editAlert.threshold.toString() : '');
+      setTrailType(editAlert.trailAmount != null ? 'amount' : 'percent');
+      setTrailValue(
+        editAlert.trailPercent != null
+          ? editAlert.trailPercent.toString()
+          : editAlert.trailAmount != null
+            ? editAlert.trailAmount.toString()
+            : ''
+      );
+      setIntent(editAlert.intent ?? 'none');
       setNote(editAlert.note || '');
-    } else if (asset) {
-      setSelectedAsset(asset);
-      setRule('price_below');
-      setThreshold('');
-      setNote('');
     } else {
-      setSelectedAsset(null);
+      setSelectedAsset(asset ?? null);
       setRule('price_below');
       setThreshold('');
+      setTrailType('percent');
+      setTrailValue('');
+      setIntent('none');
       setNote('');
     }
     setSymbolQuery('');
@@ -107,18 +122,39 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
     setThreshold(value.toFixed(2));
   };
 
+  const applyTrailPreset = (pct: number) => {
+    setTrailType('percent');
+    setTrailValue(pct.toString());
+  };
+
   const mutation = useMutation({
     mutationFn: async () => {
       const thresholdNum = parseFloat(threshold);
+      const trailNum = parseFloat(trailValue);
+      const effectiveIntent: PriceAlertIntent | undefined = isTrailing
+        ? 'sell'
+        : intent === 'none'
+          ? undefined
+          : intent;
       if (isEdit && editAlert) {
-        return api.updateAlert(editAlert.id, { rule, threshold: thresholdNum, note: note || undefined });
+        return api.updateAlert(editAlert.id, {
+          rule,
+          threshold: isTrailing ? null : thresholdNum,
+          intent: effectiveIntent,
+          trailPercent: isTrailing && trailType === 'percent' ? trailNum : null,
+          trailAmount: isTrailing && trailType === 'amount' ? trailNum : null,
+          note: note || undefined,
+        });
       }
       if (!selectedAsset) throw new Error('Select an asset first');
       return api.createAlert({
         assetId: selectedAsset.assetId,
         symbol: selectedAsset.assetId ? undefined : selectedAsset.symbol,
         rule,
-        threshold: thresholdNum,
+        threshold: isTrailing ? undefined : thresholdNum,
+        intent: effectiveIntent,
+        trailPercent: isTrailing && trailType === 'percent' ? trailNum : undefined,
+        trailAmount: isTrailing && trailType === 'amount' ? trailNum : undefined,
         note: note || undefined,
       });
     },
@@ -133,17 +169,32 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
   });
 
   const thresholdNum = parseFloat(threshold);
-  const canSubmit = (isEdit || !!selectedAsset) && !isNaN(thresholdNum) && thresholdNum > 0;
+  const trailNum = parseFloat(trailValue);
+  const trailValid =
+    !isNaN(trailNum) && trailNum > 0 && (trailType === 'amount' || trailNum < 100);
+  const canSubmit =
+    (isEdit || !!selectedAsset) &&
+    (isTrailing ? trailValid : !isNaN(thresholdNum) && thresholdNum > 0);
+
+  // Where the stop would sit right now, from the live quote (create) or the
+  // tracked high-water mark (edit).
+  const previewBase = isEdit ? editAlert?.highWaterMark ?? null : selectedAsset?.currentPrice ?? null;
+  const previewStop =
+    isTrailing && trailValid && previewBase != null
+      ? trailType === 'percent'
+        ? previewBase * (1 - trailNum / 100)
+        : previewBase - trailNum
+      : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{isEdit ? 'Edit Alert' : 'Create Price Alert'}</DialogTitle>
+          <DialogTitle>{isEdit ? 'Edit Alert' : 'Create Alert'}</DialogTitle>
           <DialogDescription>
             {selectedAsset
-              ? `Set a price rule for ${selectedAsset.symbol}.`
-              : 'Search for an asset, then set a price rule.'}
+              ? `Set a price trigger or trailing stop for ${selectedAsset.symbol}.`
+              : 'Search for an asset, then set a price trigger or trailing stop.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -203,27 +254,93 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
                     <SelectContent>
                       <SelectItem value="price_below">Price falls below</SelectItem>
                       <SelectItem value="price_above">Price rises above</SelectItem>
+                      <SelectItem value="trailing_stop">Trailing stop</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="alert-threshold">Threshold</Label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                    <Input
-                      id="alert-threshold"
-                      type="number"
-                      step="0.01"
-                      value={threshold}
-                      onChange={(e) => setThreshold(e.target.value)}
-                      placeholder="0.00"
-                      className="pl-7"
-                    />
+                {isTrailing ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="alert-trail">Trail</Label>
+                    <div className="flex gap-1.5">
+                      <div className="relative flex-1">
+                        {trailType === 'amount' && (
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                        )}
+                        <Input
+                          id="alert-trail"
+                          type="number"
+                          step={trailType === 'percent' ? '0.1' : '0.01'}
+                          value={trailValue}
+                          onChange={(e) => setTrailValue(e.target.value)}
+                          placeholder={trailType === 'percent' ? '8' : '15.00'}
+                          className={trailType === 'amount' ? 'pl-7' : undefined}
+                        />
+                      </div>
+                      <Select value={trailType} onValueChange={(v) => setTrailType(v as TrailType)}>
+                        <SelectTrigger className="w-16 shrink-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="percent">%</SelectItem>
+                          <SelectItem value="amount">$</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label htmlFor="alert-threshold">Threshold</Label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                      <Input
+                        id="alert-threshold"
+                        type="number"
+                        step="0.01"
+                        value={threshold}
+                        onChange={(e) => setThreshold(e.target.value)}
+                        placeholder="0.00"
+                        className="pl-7"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {selectedAsset?.currentPrice !== undefined && (
+              {/* Intent — what the notification tells you to do */}
+              <div className="space-y-2">
+                <Label>Action when triggered</Label>
+                {isTrailing ? (
+                  <div className="rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
+                    🔴 Sell — trailing stops protect a position
+                  </div>
+                ) : (
+                  <Select value={intent} onValueChange={(v) => setIntent(v as IntentChoice)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Just notify</SelectItem>
+                      <SelectItem value="buy">🟢 Buy signal</SelectItem>
+                      <SelectItem value="sell">🔴 Sell signal</SelectItem>
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+
+              {isTrailing && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Quick trails</Label>
+                  <div className="flex gap-2 flex-wrap">
+                    {[5, 8, 10].map((pct) => (
+                      <Button key={pct} type="button" variant="outline" size="sm" onClick={() => applyTrailPreset(pct)}>
+                        {pct}%
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!isTrailing && selectedAsset?.currentPrice !== undefined && (
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">
                     Quick presets (current price ${selectedAsset.currentPrice.toFixed(2)})
@@ -242,13 +359,21 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
                 </div>
               )}
 
+              {previewStop != null && previewBase != null && (
+                <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+                  Stop starts at <span className="font-mono font-medium text-foreground">{formatMoney(previewStop)}</span>{' '}
+                  (from {isEdit ? 'high' : 'current price'} {formatMoney(previewBase)}) and rises as the price makes new
+                  highs.
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="alert-note">Note (optional)</Label>
                 <Input
                   id="alert-note"
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
-                  placeholder="e.g. stop loss"
+                  placeholder="e.g. protect gains"
                 />
               </div>
             </>

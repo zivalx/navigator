@@ -12,9 +12,10 @@ import { formatAlertHeadline, formatMoney } from './alertUtils';
 export function AlertsBell() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  // Tracks which alert ids we've already surfaced a toast for; null means "not seeded yet"
-  // so the first load never toasts for alerts that were already triggered before mount.
-  const seenIdsRef = useRef<Set<string> | null>(null);
+  // Tracks which alert ids we've already surfaced a toast for. Starts empty
+  // on purpose: alerts that triggered while the app was closed toast on
+  // entry, so a fired trailing stop greets the user when they come back.
+  const seenIdsRef = useRef<Set<string>>(new Set());
 
   const { data: alerts = [] } = useQuery({
     queryKey: ['alerts', 'unacknowledged'],
@@ -24,11 +25,7 @@ export function AlertsBell() {
 
   useEffect(() => {
     const currentIds = new Set(alerts.map((a) => a.id));
-    if (seenIdsRef.current === null) {
-      seenIdsRef.current = currentIds;
-      return;
-    }
-    const newlyTriggered = alerts.filter((a) => !seenIdsRef.current!.has(a.id));
+    const newlyTriggered = alerts.filter((a) => !seenIdsRef.current.has(a.id));
     for (const alert of newlyTriggered) {
       toast(`Alert triggered: ${formatAlertHeadline(alert)}`, {
         description: alert.triggeredPrice != null ? `Hit ${formatMoney(alert.triggeredPrice)}` : undefined,

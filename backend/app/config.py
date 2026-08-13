@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
 
+    # Notifications - Telegram (empty = disabled)
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Cache TTL (seconds)
     quote_cache_ttl: int = 60
     news_cache_ttl: int = 900
