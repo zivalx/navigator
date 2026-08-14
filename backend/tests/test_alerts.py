@@ -8,101 +8,19 @@ Covers docs/superpowers/specs/2026-07-23-price-alerts-design.md:
   already-inactive alerts skipped, and quote-fetch failure leaving alerts
   untouched.
 """
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db
 from app.models.alert import AlertRule, PriceAlert
-from app.models.asset import Asset, AssetType, Currency, MarketRegion
-from app.routers import alerts as alerts_router_module
+from app.models.asset import Asset, Currency
 from app.services.market_data import MarketDataService
 from app.tasks import scheduler as scheduler_module
+from tests.factories import make_alert, make_asset, patch_quotes, reload_alert
 
 NOW = datetime.now(timezone.utc)
 
-
-@pytest.fixture()
-def db_session():
-    """Module-local override of conftest's db_session fixture.
-
-    Uses StaticPool (single shared connection) instead of the default
-    per-thread SQLite pool: this module drives requests through
-    TestClient, whose ASGI calls can run in a worker thread, and the
-    stock in-memory-sqlite fixture would otherwise hand that thread a
-    brand-new (tableless) :memory: database.
-    """
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    session = TestingSessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
-        Base.metadata.drop_all(bind=engine)
-        engine.dispose()
-
-
-def make_asset(db, symbol="AAA", currency=Currency.USD):
-    asset = Asset(
-        id=str(uuid.uuid4()),
-        symbol=symbol,
-        name=f"{symbol} Inc.",
-        exchange="NASDAQ",
-        currency=currency,
-        asset_type=AssetType.STOCK,
-        market_region=MarketRegion.US,
-    )
-    db.add(asset)
-    db.commit()
-    return asset
-
-
-def make_alert(
-    db,
-    asset,
-    rule=AlertRule.PRICE_BELOW,
-    threshold=100.0,
-    is_active=True,
-    triggered_at=None,
-    triggered_price=None,
-    acknowledged_at=None,
-    note=None,
-):
-    alert = PriceAlert(
-        id=str(uuid.uuid4()),
-        asset_id=asset.id,
-        rule=rule,
-        threshold=threshold,
-        note=note,
-        is_active=is_active,
-        triggered_at=triggered_at,
-        triggered_price=triggered_price,
-        acknowledged_at=acknowledged_at,
-    )
-    db.add(alert)
-    db.commit()
-    return alert
-
-
-@pytest.fixture()
-def client(db_session):
-    app = FastAPI()
-    app.include_router(alerts_router_module.router, prefix="/api/alerts")
-    app.dependency_overrides[get_db] = lambda: db_session
-    return TestClient(app)
+# db_session (StaticPool), client, and eval_db come from conftest.py.
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +67,9 @@ def test_create_alert_rejects_nonpositive_threshold(client, db_session):
         "/api/alerts/",
         json={"assetId": asset.id, "rule": "price_below", "threshold": 0},
     )
-    assert response.status_code == 400
+    # Shape validation lives in the shared create schema → 422 (was 400 when
+    # the endpoint hand-checked it).
+    assert response.status_code == 422
 
 
 def test_create_alert_unknown_asset_id_404s(client):
@@ -359,37 +279,7 @@ def test_reactivate_clears_triggered_and_acknowledged_fields(client, db_session)
 # Scheduler evaluation job
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def eval_db(db_session, monkeypatch):
-    """Point the scheduler's SessionLocal() calls at the shared test session
-    so evaluate_price_alerts() operates on the same in-memory DB.
-
-    evaluate_price_alerts() calls db.close() in its own finally block (as it
-    does in production, where it owns the session end-to-end) — that expunges
-    objects from the identity map, so tests re-query by id afterwards instead
-    of calling session.refresh() on the original instances.
-    """
-    monkeypatch.setattr(scheduler_module, "SessionLocal", lambda: db_session)
-    return db_session
-
-
-def reload(db, alert_id):
-    """Re-query an alert by id.
-
-    evaluate_price_alerts() closes its session when done, which detaches
-    (and expires) the ORM instances created via make_alert() in these
-    tests — so accessing `.id` on the original object after the call would
-    itself raise. Capture the id string *before* invoking evaluate, then
-    reload() to inspect post-evaluation state.
-    """
-    return db.query(PriceAlert).filter(PriceAlert.id == alert_id).first()
-
-
-def _patch_quotes(monkeypatch, quotes_by_symbol):
-    async def fake_get_quotes(self, symbols):
-        return {s: quotes_by_symbol[s] for s in symbols if s in quotes_by_symbol}
-
-    monkeypatch.setattr(MarketDataService, "get_quotes", fake_get_quotes)
+# eval_db comes from conftest.py; reload_alert/patch helpers from tests.factories.
 
 
 @pytest.mark.asyncio
@@ -397,11 +287,11 @@ async def test_evaluate_triggers_price_below_when_price_falls_below_threshold(ev
     asset = make_asset(eval_db, symbol="AAPL")
     alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
     alert_id = alert.id
-    _patch_quotes(monkeypatch, {"AAPL": {"price": 175.0}})
+    patch_quotes(monkeypatch, {"AAPL": {"price": 175.0}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    alert = reload(eval_db, alert_id)
+    alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is False
     assert alert.triggered_price == 175.0
     assert alert.triggered_at is not None
@@ -412,11 +302,11 @@ async def test_evaluate_triggers_price_above_when_price_rises_above_threshold(ev
     asset = make_asset(eval_db, symbol="AAPL")
     alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_ABOVE, threshold=200.0)
     alert_id = alert.id
-    _patch_quotes(monkeypatch, {"AAPL": {"price": 205.0}})
+    patch_quotes(monkeypatch, {"AAPL": {"price": 205.0}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    alert = reload(eval_db, alert_id)
+    alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is False
     assert alert.triggered_price == 205.0
 
@@ -427,12 +317,12 @@ async def test_evaluate_boundary_is_inclusive(eval_db, monkeypatch):
     below = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
     above = make_alert(eval_db, asset, rule=AlertRule.PRICE_ABOVE, threshold=180.0)
     below_id, above_id = below.id, above.id
-    _patch_quotes(monkeypatch, {"AAPL": {"price": 180.0}})
+    patch_quotes(monkeypatch, {"AAPL": {"price": 180.0}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    assert reload(eval_db, below_id).is_active is False
-    assert reload(eval_db, above_id).is_active is False
+    assert reload_alert(eval_db, below_id).is_active is False
+    assert reload_alert(eval_db, above_id).is_active is False
 
 
 @pytest.mark.asyncio
@@ -441,12 +331,12 @@ async def test_evaluate_does_not_trigger_when_condition_not_met(eval_db, monkeyp
     below = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
     above = make_alert(eval_db, asset, rule=AlertRule.PRICE_ABOVE, threshold=200.0)
     below_id, above_id = below.id, above.id
-    _patch_quotes(monkeypatch, {"AAPL": {"price": 190.0}})
+    patch_quotes(monkeypatch, {"AAPL": {"price": 190.0}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    below = reload(eval_db, below_id)
-    above = reload(eval_db, above_id)
+    below = reload_alert(eval_db, below_id)
+    above = reload_alert(eval_db, above_id)
     assert below.is_active is True
     assert below.triggered_at is None
     assert above.is_active is True
@@ -461,11 +351,11 @@ async def test_evaluate_skips_already_inactive_alerts(eval_db, monkeypatch):
         is_active=False, triggered_at=NOW - timedelta(hours=1), triggered_price=175.0,
     )
     already_triggered_id = already_triggered.id
-    _patch_quotes(monkeypatch, {"AAPL": {"price": 100.0}})
+    patch_quotes(monkeypatch, {"AAPL": {"price": 100.0}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    already_triggered = reload(eval_db, already_triggered_id)
+    already_triggered = reload_alert(eval_db, already_triggered_id)
     # Untouched - triggered_price/at from before, not overwritten.
     # (SQLite drops tzinfo on round-trip, so compare naive wall-clock values.)
     assert already_triggered.triggered_price == 175.0
@@ -487,7 +377,7 @@ async def test_evaluate_leaves_alerts_untouched_when_quote_fetch_fails(eval_db, 
 
     await scheduler_module.evaluate_price_alerts()
 
-    alert = reload(eval_db, alert_id)
+    alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is True
     assert alert.triggered_at is None
     assert alert.triggered_price is None
@@ -498,16 +388,16 @@ async def test_evaluate_skips_alert_when_its_own_quote_has_error(eval_db, monkey
     asset = make_asset(eval_db, symbol="AAPL")
     alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
     alert_id = alert.id
-    _patch_quotes(monkeypatch, {"AAPL": {"error": "no data"}})
+    patch_quotes(monkeypatch, {"AAPL": {"error": "no data"}})
 
     await scheduler_module.evaluate_price_alerts()
 
-    alert = reload(eval_db, alert_id)
+    alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is True
 
 
 @pytest.mark.asyncio
 async def test_evaluate_noop_when_no_active_alerts(eval_db, monkeypatch):
-    _patch_quotes(monkeypatch, {})
+    patch_quotes(monkeypatch, {})
     # Should not raise even with nothing to evaluate.
     await scheduler_module.evaluate_price_alerts()

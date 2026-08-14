@@ -224,9 +224,9 @@ export interface CreatePriceAlertPayload {
 
 export interface UpdatePriceAlertPayload {
   rule?: PriceAlertRule;
-  // null explicitly clears a field (e.g. switching a trail from % to $).
+  // null explicitly clears a field (undefined leaves it unchanged).
   threshold?: number | null;
-  intent?: PriceAlertIntent;
+  intent?: PriceAlertIntent | null;
   trailPercent?: number | null;
   trailAmount?: number | null;
   note?: string;

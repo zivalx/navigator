@@ -278,15 +278,20 @@ async def notify_triggered_alerts(db) -> None:
 
     Picks up alerts whose delivery failed on a previous cycle too, so a
     network blip delays a message by one cycle instead of losing it. When no
-    Telegram channel is configured, alerts are marked handled so a backlog
-    doesn't build up (and then blast out if a bot is configured later).
-    Notification errors never propagate into the evaluation loop.
+    Telegram channel is configured, alerts are stamped notification_skipped_at
+    — distinct from notified_at (delivered) so a transient config gap is
+    auditable, while still keeping the backlog from blasting out if a bot is
+    configured later. Per-alert commits are intentional: a delivered message
+    has its notified_at persisted even if a later alert's send fails, keeping
+    notifications at-most-once. Errors never propagate into the evaluation
+    loop.
     """
     pending = (
         db.query(PriceAlert)
         .filter(
             PriceAlert.triggered_at.isnot(None),
             PriceAlert.notified_at.is_(None),
+            PriceAlert.notification_skipped_at.is_(None),
         )
         .all()
     )
@@ -300,7 +305,14 @@ async def notify_triggered_alerts(db) -> None:
                 sent = await service.send(format_alert_message(alert))
                 if not sent:
                     continue  # retry next cycle
-            alert.notified_at = datetime.now(timezone.utc)
+                alert.notified_at = datetime.now(timezone.utc)
+            else:
+                alert.notification_skipped_at = datetime.now(timezone.utc)
+                logger.warning(
+                    "Alert %s triggered but no notification channel is "
+                    "configured — marked skipped, will NOT be delivered later",
+                    alert.id,
+                )
             db.commit()
         except Exception as e:
             db.rollback()

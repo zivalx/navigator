@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
@@ -9,13 +9,15 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { api } from '@/lib/api';
 import { formatAlertHeadline, formatMoney } from './alertUtils';
 
+// Alert ids we've already surfaced a toast for. Module-level so it survives
+// route changes (each page mounts its own AppLayout/AlertsBell) — alerts that
+// fired while the app was closed toast once on entry, then stay quiet until
+// acknowledged. Resets only on a full page load, which is "entering the app".
+const toastedAlertIds = new Set<string>();
+
 export function AlertsBell() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  // Tracks which alert ids we've already surfaced a toast for. Starts empty
-  // on purpose: alerts that triggered while the app was closed toast on
-  // entry, so a fired trailing stop greets the user when they come back.
-  const seenIdsRef = useRef<Set<string>>(new Set());
 
   const { data: alerts = [] } = useQuery({
     queryKey: ['alerts', 'unacknowledged'],
@@ -24,14 +26,13 @@ export function AlertsBell() {
   });
 
   useEffect(() => {
-    const currentIds = new Set(alerts.map((a) => a.id));
-    const newlyTriggered = alerts.filter((a) => !seenIdsRef.current.has(a.id));
-    for (const alert of newlyTriggered) {
+    for (const alert of alerts) {
+      if (toastedAlertIds.has(alert.id)) continue;
+      toastedAlertIds.add(alert.id);
       toast(`Alert triggered: ${formatAlertHeadline(alert)}`, {
         description: alert.triggeredPrice != null ? `Hit ${formatMoney(alert.triggeredPrice)}` : undefined,
       });
     }
-    seenIdsRef.current = currentIds;
   }, [alerts]);
 
   const acknowledgeMutation = useMutation({

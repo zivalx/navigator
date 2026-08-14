@@ -38,9 +38,11 @@ class PriceAlert(Base):
     triggered_at = Column(DateTime(timezone=True), nullable=True)
     triggered_price = Column(Float, nullable=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
-    # Set once the trigger notification has been handled (delivered via
-    # Telegram, or deliberately skipped because no channel is configured).
+    # notified_at means DELIVERED. notification_skipped_at means the trigger
+    # fired while no channel was configured — kept distinct so a transient
+    # config gap is auditable instead of masquerading as a successful send.
     notified_at = Column(DateTime(timezone=True), nullable=True)
+    notification_skipped_at = Column(DateTime(timezone=True), nullable=True)
 
     # One-sided relationship: Asset does not declare a back_populates for
     # this (app/models/asset.py is intentionally left untouched).

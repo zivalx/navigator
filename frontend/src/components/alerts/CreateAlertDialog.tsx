@@ -131,16 +131,13 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
     mutationFn: async () => {
       const thresholdNum = parseFloat(threshold);
       const trailNum = parseFloat(trailValue);
-      const effectiveIntent: PriceAlertIntent | undefined = isTrailing
-        ? 'sell'
-        : intent === 'none'
-          ? undefined
-          : intent;
       if (isEdit && editAlert) {
         return api.updateAlert(editAlert.id, {
           rule,
           threshold: isTrailing ? null : thresholdNum,
-          intent: effectiveIntent,
+          // 'none' explicitly clears a previously-set intent; trailing stops
+          // keep their backend-defaulted sell intent.
+          intent: isTrailing ? undefined : intent === 'none' ? null : intent,
           trailPercent: isTrailing && trailType === 'percent' ? trailNum : null,
           trailAmount: isTrailing && trailType === 'amount' ? trailNum : null,
           note: note || undefined,
@@ -152,7 +149,9 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
         symbol: selectedAsset.assetId ? undefined : selectedAsset.symbol,
         rule,
         threshold: isTrailing ? undefined : thresholdNum,
-        intent: effectiveIntent,
+        // Trailing stops default to sell on the backend — the single place
+        // that rule lives.
+        intent: isTrailing || intent === 'none' ? undefined : intent,
         trailPercent: isTrailing && trailType === 'percent' ? trailNum : undefined,
         trailAmount: isTrailing && trailType === 'amount' ? trailNum : undefined,
         note: note || undefined,
@@ -177,14 +176,22 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
     (isTrailing ? trailValid : !isNaN(thresholdNum) && thresholdNum > 0);
 
   // Where the stop would sit right now, from the live quote (create) or the
-  // tracked high-water mark (edit).
+  // tracked high-water mark (edit). When editing with unchanged trail inputs,
+  // show the backend-derived stop rather than re-deriving it client-side.
   const previewBase = isEdit ? editAlert?.highWaterMark ?? null : selectedAsset?.currentPrice ?? null;
-  const previewStop =
-    isTrailing && trailValid && previewBase != null
-      ? trailType === 'percent'
+  const trailUnchanged =
+    isEdit &&
+    editAlert != null &&
+    (trailType === 'percent'
+      ? editAlert.trailPercent != null && trailNum === editAlert.trailPercent
+      : editAlert.trailAmount != null && trailNum === editAlert.trailAmount);
+  const previewStop = !isTrailing || !trailValid || previewBase == null
+    ? null
+    : trailUnchanged && editAlert?.currentStopPrice != null
+      ? editAlert.currentStopPrice
+      : trailType === 'percent'
         ? previewBase * (1 - trailNum / 100)
-        : previewBase - trailNum
-      : null;
+        : previewBase - trailNum;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

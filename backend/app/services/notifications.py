@@ -1,21 +1,19 @@
 """Outbound notifications for triggered alerts.
 
-One channel for now: Telegram Bot API. Configured via TELEGRAM_BOT_TOKEN and
-TELEGRAM_CHAT_ID env vars; when unset the service is disabled and sends are
-skipped (logged once per process), so local use without a bot keeps working.
+One channel for now: Telegram (via app/providers/telegram.py). Configured with
+TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars; when unset the service is
+disabled and sends are skipped (logged once per process), so local use without
+a bot keeps working.
 
 See docs/superpowers/specs/2026-08-12-trailing-stop-alerts-design.md.
 """
 import logging
 
-import httpx
-
 from ..config import settings
 from ..models.alert import AlertIntent, AlertRule, PriceAlert
+from ..providers.telegram import TelegramProvider
 
 logger = logging.getLogger(__name__)
-
-TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 _warned_disabled = False
 
@@ -26,17 +24,16 @@ def format_alert_message(alert: PriceAlert) -> str:
     Examples:
         🔴 SELL — trailing stop hit: AAPL at $301.10 (high $327.50, trail 8% → stop $301.30)
         🟢 BUY — target hit: NVDA ≤ $150.00 (now $149.20)
+
+    Intent is read from the alert as stored — the write path (services/alerts)
+    is the single place that defaults trailing stops to SELL.
     """
     symbol = alert.asset.symbol if alert.asset else "?"
     price = alert.triggered_price
 
-    intent = alert.intent
-    if intent is None and alert.rule == AlertRule.TRAILING_STOP:
-        intent = AlertIntent.SELL
-
-    if intent == AlertIntent.BUY:
+    if alert.intent == AlertIntent.BUY:
         prefix = "🟢 BUY"
-    elif intent == AlertIntent.SELL:
+    elif alert.intent == AlertIntent.SELL:
         prefix = "🔴 SELL"
     else:
         prefix = "🔔 ALERT"
@@ -64,7 +61,7 @@ def format_alert_message(alert: PriceAlert) -> str:
 
 
 class NotificationService:
-    """Sends alert-trigger notifications via Telegram."""
+    """Sends alert-trigger notifications through the configured channel."""
 
     def __init__(
         self,
@@ -79,11 +76,7 @@ class NotificationService:
         return bool(self.bot_token and self.chat_id)
 
     async def send(self, text: str) -> bool:
-        """Send a Telegram message. Returns True on success.
-
-        Never raises — a delivery failure is logged and reported as False so
-        the caller can retry on the next evaluation cycle.
-        """
+        """Send a message. Returns True on success; never raises."""
         global _warned_disabled
         if not self.enabled:
             if not _warned_disabled:
@@ -94,14 +87,4 @@ class NotificationService:
                 _warned_disabled = True
             return False
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    TELEGRAM_API_URL.format(token=self.bot_token),
-                    json={"chat_id": self.chat_id, "text": text},
-                )
-                response.raise_for_status()
-            return True
-        except Exception as e:
-            logger.warning("Telegram send failed: %s", e)
-            return False
+        return await TelegramProvider(self.bot_token, self.chat_id).send_message(text)

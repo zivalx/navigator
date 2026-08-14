@@ -47,7 +47,9 @@ function statusBadge(alert: PriceAlert) {
 }
 
 function intentBadge(alert: PriceAlert) {
-  const intent = alert.intent ?? (alert.rule === 'trailing_stop' ? 'sell' : null);
+  // Intent is stored at write time (trailing stops default to sell on the
+  // backend) — no read-side fallback needed.
+  const intent = alert.intent;
   if (intent === 'buy') {
     return <Badge className="bg-success/15 text-success hover:bg-success/15">Buy</Badge>;
   }

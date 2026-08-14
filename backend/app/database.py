@@ -37,9 +37,30 @@ def _migrate_price_alerts():
 
     create_all() only creates missing tables, so pre-existing price_alerts
     tables need the new columns added explicitly. Postgres-only (SQLite test
-    DBs are created fresh from the models). Idempotent — safe on every start.
+    DBs are created fresh from the models). Probes information_schema first so
+    fully-migrated databases skip the DDL entirely (no locks on every boot).
     """
     if engine.dialect.name != "postgresql":
+        return
+
+    with engine.connect() as conn:
+        existing = {
+            row[0]
+            for row in conn.exec_driver_sql(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'price_alerts'"
+            )
+        }
+    new_columns = {
+        "intent": "alertintent",
+        "trail_percent": "double precision",
+        "trail_amount": "double precision",
+        "high_water_mark": "double precision",
+        "notified_at": "timestamptz",
+        "notification_skipped_at": "timestamptz",
+    }
+    missing = {name: ddl for name, ddl in new_columns.items() if name not in existing}
+    if not missing:
         return
 
     statements = [
@@ -49,13 +70,20 @@ def _migrate_price_alerts():
             "DO $$ BEGIN CREATE TYPE alertintent AS ENUM ('BUY', 'SELL'); "
             "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
         ),
-        "ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS intent alertintent",
-        "ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS trail_percent double precision",
-        "ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS trail_amount double precision",
-        "ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS high_water_mark double precision",
-        "ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS notified_at timestamptz",
+        *[
+            f"ALTER TABLE price_alerts ADD COLUMN IF NOT EXISTS {name} {ddl}"
+            for name, ddl in missing.items()
+        ],
         "ALTER TABLE price_alerts ALTER COLUMN threshold DROP NOT NULL",
     ]
+    if "notified_at" in missing:
+        # Alerts that triggered before this feature existed were already seen
+        # in the UI; stamp them delivered so the first notification pass
+        # doesn't blast the whole history to Telegram.
+        statements.append(
+            "UPDATE price_alerts SET notified_at = triggered_at "
+            "WHERE triggered_at IS NOT NULL AND notified_at IS NULL"
+        )
     # AUTOCOMMIT so ALTER TYPE ADD VALUE takes effect before later statements
     # reference the new value/type.
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
