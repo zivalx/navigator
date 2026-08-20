@@ -132,6 +132,31 @@ async def test_daily_snapshot_buy_is_not_a_gain(db_session):
 
 
 @pytest.mark.asyncio
+async def test_daily_snapshot_ignores_uneven_snapshot_coverage(db_session):
+    """A second asset whose price history only begins on day 2 must NOT show
+    as a huge gain that day (the coverage-artifact bug). Only assets with a
+    price on BOTH days contribute to daily P&L."""
+    a = _asset(db_session, symbol="AAA")
+    b = _asset(db_session, symbol="BBB")
+    _lot(db_session, a, qty=10, purchase_date=dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc))
+    _lot(db_session, b, qty=100, purchase_date=dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc))
+    # Day 1: only AAA has a snapshot.
+    _snap(db_session, a, price=100.0, day=dt.date(2026, 8, 18))
+    # Day 2: AAA flat, BBB's price history appears for the first time at $50.
+    _snap(db_session, a, price=100.0, day=dt.date(2026, 8, 19))
+    _snap(db_session, b, price=50.0, day=dt.date(2026, 8, 19))
+    svc = PortfolioService(db_session, base_currency=Currency.USD)
+
+    await svc.compute_daily_snapshot(dt.date(2026, 8, 18))
+    day19 = await svc.compute_daily_snapshot(dt.date(2026, 8, 19))
+
+    # NAV jumps (BBB now valued) but daily P&L is ~0: AAA flat, BBB had no
+    # prior price so it isn't counted as a gain.
+    assert day19.nav == pytest.approx(100 * 10 + 50 * 100)  # 6000
+    assert day19.daily_pnl == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
 async def test_daily_snapshot_upsert_is_idempotent(db_session):
     a = _asset(db_session)
     _lot(db_session, a, qty=10, purchase_date=dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc))

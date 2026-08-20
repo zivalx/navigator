@@ -424,12 +424,36 @@ class PortfolioService:
     # (spec: docs/superpowers/specs/2026-08-20-daily-pnl-series-design.md)
     # ------------------------------------------------------------------
 
+    async def _asset_usd_price_at(self, asset_id: str, when: datetime) -> Optional[float]:
+        """Latest snapshot price for an asset on/before `when`, converted to USD.
+        None when the asset has no snapshot yet (so it can't be diffed)."""
+        snap = (
+            self.db.query(PriceSnapshot)
+            .filter(
+                PriceSnapshot.asset_id == asset_id,
+                PriceSnapshot.timestamp <= when,
+            )
+            .order_by(PriceSnapshot.timestamp.desc())
+            .first()
+        )
+        if snap is None:
+            return None
+        try:
+            return await self.fx_service.convert(snap.price, Currency(snap.currency), Currency.USD)
+        except Exception:
+            return snap.price
+
     async def compute_daily_snapshot(self, day: date_cls) -> Optional[PortfolioSnapshot]:
         """Compute and upsert the portfolio_snapshots row for `day`.
 
-        NAV is valued in USD at end of `day`; net_flow is the USD cost of lots
-        purchased on `day` (buys only); daily_pnl is flow-adjusted against the
-        most recent stored row before `day`. Idempotent (upsert on date)."""
+        NAV is the USD portfolio value at end of `day`. daily_pnl is the sum of
+        each held lot's per-asset price move since the previous stored day —
+        NOT a NAV difference. Summing per-asset moves is what makes it accurate:
+        a lot bought after the prior day contributes nothing (it wasn't held
+        then), and an asset whose price history only just begins contributes
+        nothing (no prior price to diff), so uneven snapshot coverage (e.g.
+        crypto-only weekend days) can't masquerade as a gain. net_flow (USD cost
+        of lots bought on `day`) is stored for reference. Idempotent."""
         end_of_day = datetime.combine(day, dt_time(23, 59, 59), tzinfo=timezone.utc)
         holdings = self.db.query(HoldingLot).all()
 
@@ -443,9 +467,7 @@ class PortfolioService:
         net_flow = 0.0
         for lot in holdings:
             pd = lot.purchase_date
-            if pd is None:
-                continue
-            if _ensure_aware(pd).date() == day:
+            if pd is not None and _ensure_aware(pd).date() == day:
                 try:
                     cost_usd = await usd.fx_service.convert(
                         lot.avg_cost, Currency(lot.cost_currency), Currency.USD
@@ -462,12 +484,21 @@ class PortfolioService:
         )
         prev_nav = prev.nav if prev else None
 
-        if prev_nav and prev_nav > 0:
-            daily_pnl = nav - prev_nav - net_flow
+        daily_pnl = 0.0
+        daily_pnl_pct = 0.0
+        if prev is not None and prev_nav and prev_nav > 0:
+            prev_end = datetime.combine(prev.date, dt_time(23, 59, 59), tzinfo=timezone.utc)
+            for lot in holdings:
+                pd = lot.purchase_date
+                # Only lots held at the previous close contribute today's move.
+                if pd is not None and _ensure_aware(pd) > prev_end:
+                    continue
+                p_now = await usd._asset_usd_price_at(lot.asset_id, end_of_day)
+                p_prev = await usd._asset_usd_price_at(lot.asset_id, prev_end)
+                if p_now is None or p_prev is None:
+                    continue
+                daily_pnl += lot.quantity * (p_now - p_prev)
             daily_pnl_pct = daily_pnl / prev_nav * 100
-        else:
-            daily_pnl = 0.0
-            daily_pnl_pct = 0.0
 
         row = self.db.query(PortfolioSnapshot).filter_by(date=day).first()
         if row is None:

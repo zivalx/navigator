@@ -153,7 +153,14 @@ async def backfill_historical_prices() -> None:
                     continue
 
                 try:
-                    url = YAHOO_CHART_URL.format(symbol=asset.symbol.upper())
+                    # Crypto trades on Yahoo as "<SYM>-USD" (e.g. BTC-USD).
+                    # Using the bare ticker ("BTC") returns an unrelated ~$35
+                    # equity, which poisons NAV/daily-P&L history — so map
+                    # crypto symbols to the -USD pair.
+                    yahoo_symbol = asset.symbol.upper()
+                    if asset.asset_type.value == "crypto" and "-" not in yahoo_symbol:
+                        yahoo_symbol = f"{yahoo_symbol}-USD"
+                    url = YAHOO_CHART_URL.format(symbol=yahoo_symbol)
                     params = {"interval": "1d", "range": "6mo"}
                     response = await client.get(
                         url, params=params, headers=YAHOO_HEADERS
