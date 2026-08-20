@@ -18,6 +18,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
 import { usePortfolio } from '@/contexts/PortfolioContext';
+import { DailyPnLChart } from './DailyPnLChart';
+
+type ChartView = 'nav' | 'daily';
 
 const PERIODS: { value: PortfolioHistoryPeriod; label: string }[] = [
   { value: '1w', label: '1W' },
@@ -87,6 +90,7 @@ function ChartTooltip({ active, payload, currency = 'USD' }: CustomTooltipProps)
 
 export function PerformanceChart() {
   const [period, setPeriod] = useState<PortfolioHistoryPeriod>('3m');
+  const [view, setView] = useState<ChartView>('nav');
   const { baseCurrency } = usePortfolio();
 
   const { data, isLoading, isError } = useQuery({
@@ -113,10 +117,31 @@ export function PerformanceChart() {
       <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
         <div>
           <h3 className="text-lg font-semibold flex items-center">
-            Portfolio Performance
-            <InfoTooltip text="Net asset value over time, based on end-of-day price snapshots. P&L is relative to the start of the selected period." />
+            {view === 'nav' ? 'Portfolio Performance' : 'Daily P&L'}
+            <InfoTooltip
+              text={
+                view === 'nav'
+                  ? 'Net asset value over time, based on end-of-day price snapshots. P&L is relative to the start of the selected period.'
+                  : "Realized end-of-day gain or loss per day. Flow-adjusted — money you add by buying isn't counted as a gain. Sales aren't tracked yet, so a sale shows as a drop that day."
+              }
+            />
           </h3>
-          {hasEnoughHistory && lastPoint && (
+          <div className="mt-1">
+            <ToggleGroup
+              type="single"
+              value={view}
+              onValueChange={(v) => v && setView(v as ChartView)}
+              className="justify-start"
+            >
+              <ToggleGroupItem value="nav" size="sm" className="h-7 px-2.5 text-xs data-[state=on]:bg-primary/10 data-[state=on]:text-primary">
+                NAV
+              </ToggleGroupItem>
+              <ToggleGroupItem value="daily" size="sm" className="h-7 px-2.5 text-xs data-[state=on]:bg-primary/10 data-[state=on]:text-primary">
+                Daily P&amp;L
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+          {view === 'nav' && hasEnoughHistory && lastPoint && (
             <div className="mt-1 flex items-baseline gap-2">
               <span
                 className={cn(
@@ -162,7 +187,9 @@ export function PerformanceChart() {
         </ToggleGroup>
       </div>
 
-      {isLoading ? (
+      {view === 'daily' ? (
+        <DailyPnLChart period={period} />
+      ) : isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-[260px] w-full rounded-lg" />
         </div>

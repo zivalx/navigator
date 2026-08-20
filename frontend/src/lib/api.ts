@@ -3,6 +3,7 @@ import type {
   IndicatorsResponse,
   PortfolioHistoryPeriod,
   PortfolioHistoryResponse,
+  DailyPnLResponse,
   PriceAlert,
   PriceAlertStatus,
   CreatePriceAlertPayload,
@@ -45,6 +46,8 @@ export const api = {
     request<void>(`/portfolio/holdings/${id}`, { method: "DELETE" }),
   getPortfolioHistory: (period: PortfolioHistoryPeriod = "3m", baseCurrency: Currency = "USD") =>
     request<PortfolioHistoryResponse>(`/portfolio/history?period=${period}&base_currency=${baseCurrency}`),
+  getDailyPnL: (period: PortfolioHistoryPeriod = "3m", baseCurrency: Currency = "USD") =>
+    request<DailyPnLResponse>(`/portfolio/daily-pnl?period=${period}&base_currency=${baseCurrency}`),
 
   // Watchlists
   getWatchlists: () => request<any[]>("/watchlist/"),

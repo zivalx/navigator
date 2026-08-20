@@ -249,3 +249,19 @@ export interface PortfolioHistoryResponse {
   period: PortfolioHistoryPeriod;
   points: PortfolioHistoryPoint[];
 }
+
+// Persisted daily P&L + EOD NAV series
+// (spec: docs/superpowers/specs/2026-08-20-daily-pnl-series-design.md)
+export interface DailyPnLPoint {
+  date: string;
+  nav: number;
+  dailyPnL: number;
+  dailyPnLPercent: number;
+  netFlow: number;
+}
+
+export interface DailyPnLResponse {
+  base_currency: Currency;
+  period: PortfolioHistoryPeriod;
+  points: DailyPnLPoint[];
+}
