@@ -50,4 +50,14 @@ class Settings(BaseSettings):
         case_sensitive = False
 
 
+_DEFAULT_SECRET_KEY = "dev-secret-key-change-in-production"
+
 settings = Settings()
+
+# Fail fast rather than silently shipping the world-known default secret to
+# production (where it would undermine any signing/session/token that later
+# relies on it).
+if settings.app_env.lower() == "production" and settings.secret_key == _DEFAULT_SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY must be set to a non-default value when APP_ENV=production"
+    )

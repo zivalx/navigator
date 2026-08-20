@@ -42,5 +42,13 @@ class TelegramProvider:
             response.raise_for_status()
             return True
         except Exception as e:
-            logger.warning("Telegram send failed: %s", e)
+            # The bot token is embedded in the request URL, so httpx exception
+            # messages can contain it — log only the exception type / status,
+            # never the full error string.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            logger.warning(
+                "Telegram send failed: %s%s",
+                type(e).__name__,
+                f" (HTTP {status})" if status else "",
+            )
             return False

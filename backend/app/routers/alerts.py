@@ -5,6 +5,7 @@ Schemas live inline here (rather than in app/schemas/) to keep this feature
 self-contained in the files it owns.
 """
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -21,6 +22,10 @@ from ..services.alerts import AlertSeedError, AlertValidationError
 from ..services.market_data import MarketDataService
 
 logger = logging.getLogger(__name__)
+
+# Allowed characters in a resolvable ticker (equities, ETFs, indices like
+# ^TNX, FX/crypto pairs like BTC-USD, share classes like BRK.B).
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-^=]+$")
 
 router = APIRouter()
 
@@ -131,6 +136,12 @@ async def _resolve_asset(asset_id: Optional[str], symbol: Optional[str], db: Ses
     symbol_upper = symbol.strip().upper()
     if not symbol_upper:
         raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+
+    # Constrain the resolve-or-create path so it can't be used to insert
+    # arbitrary junk assets: real tickers are short and use a limited charset
+    # (letters, digits, and . - ^ = for indices/pairs/classes).
+    if len(symbol_upper) > 15 or not _SYMBOL_RE.match(symbol_upper):
+        raise HTTPException(status_code=400, detail="Invalid symbol")
 
     asset = db.query(Asset).filter(Asset.symbol == symbol_upper).first()
     if asset:

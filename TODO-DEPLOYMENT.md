@@ -1,5 +1,31 @@
 # Navigator — Production Deployment Plan
 
+> ## ⚠️ Security must-dos before public deploy (from the 2026-08 audit)
+>
+> Some audit fixes are code (done: `.dockerignore` so `.env` no longer bakes
+> into the image, non-root container user, `SECRET_KEY` fail-fast in prod,
+> pinned `certbot` image, Telegram token log scrubbing, symbol input
+> validation). These remain **operational and cannot be fixed in code** —
+> do them at deploy time:
+>
+> 1. **Rotate the API keys in `backend/.env`.** They sat in plaintext in the
+>    Docker build context and (before the `.dockerignore`) would have shipped
+>    inside the image. Treat all of them — especially the Anthropic key — as
+>    compromised and reissue. `.env` itself is correctly gitignored (never
+>    committed), so this is precautionary, not a leak of record.
+> 2. **Do not trust Cloudflare Access alone.** The API has no auth; anyone
+>    hitting the VPS IP directly bypasses Cloudflare. Firewall the origin to
+>    Cloudflare IP ranges (ufw) or use a `cloudflared` tunnel with no public
+>    80/443, and/or add an app/nginx-level shared-secret.
+> 3. **`alembic upgrade head` (step 5.x below) will fail — no migrations
+>    exist.** Schema currently comes from `create_all()` + the on-boot DDL in
+>    `database.py`. Either introduce real Alembic migrations or drop that
+>    deploy step; do not run the on-boot DDL under multiple gunicorn workers
+>    racing the same schema change.
+> 4. **Never run `backend/docker-compose.yml` (dev) on the server** — it
+>    exposes Postgres/Redis on host ports without real credentials. Use
+>    `docker-compose.prod.yml` only.
+
 ## Context
 
 Navigator is part of a broader market intelligence platform. The goal is to run Navigator

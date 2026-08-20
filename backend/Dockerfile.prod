@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 COPY . .
 
+# Run as an unprivileged user — a process compromise shouldn't be root.
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 7000
 
 CMD ["gunicorn", "app.main:app", \

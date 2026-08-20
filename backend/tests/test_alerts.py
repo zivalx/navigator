@@ -214,6 +214,16 @@ def test_create_alert_empty_symbol_400s(client):
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("bad_symbol", ["'; DROP TABLE assets;--", "a b c", "<script>", "X" * 40])
+def test_create_alert_rejects_malformed_symbol(client, bad_symbol):
+    """The resolve-or-create path must not mint arbitrary junk assets."""
+    response = client.post(
+        "/api/alerts/",
+        json={"symbol": bad_symbol, "rule": "price_below", "threshold": 10.0},
+    )
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # Acknowledge + reactivate flows
 # ---------------------------------------------------------------------------
