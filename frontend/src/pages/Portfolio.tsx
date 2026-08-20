@@ -5,7 +5,7 @@ import { usePortfolio } from '@/contexts/PortfolioContext';
 import { CurrencyDisplay, PercentChange } from '@/components/common/PriceDisplay';
 
 const Portfolio = () => {
-  const { portfolioSummary } = usePortfolio();
+  const { portfolioSummary, baseCurrency } = usePortfolio();
 
   return (
     <AppLayout>
@@ -14,7 +14,7 @@ const Portfolio = () => {
           <div>
             <h1 className="text-2xl font-bold mb-1">Portfolio</h1>
             <div className="flex items-center gap-4 text-sm text-muted-foreground">
-              <span>Total: <CurrencyDisplay value={portfolioSummary.totalNav} size="sm" /></span>
+              <span>Total: <CurrencyDisplay value={portfolioSummary.totalNav} currency={baseCurrency} size="sm" /></span>
               <span className="flex items-center gap-1">
                 P&L: <PercentChange value={portfolioSummary.totalUnrealizedPnLPercent} size="sm" />
               </span>

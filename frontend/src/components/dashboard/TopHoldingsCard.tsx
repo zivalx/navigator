@@ -6,7 +6,7 @@ import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { cn } from '@/lib/utils';
 
 export function TopHoldingsCard() {
-  const { topHoldings } = usePortfolio();
+  const { topHoldings, baseCurrency } = usePortfolio();
 
   return (
     <div className="rounded-xl border border-border bg-card p-5">
@@ -38,7 +38,7 @@ export function TopHoldingsCard() {
               />
             </div>
             <div className="text-right">
-              <CurrencyDisplay value={holding.marketValue ?? 0} size="sm" />
+              <CurrencyDisplay value={holding.marketValue ?? 0} currency={baseCurrency} size="sm" />
               <div className="flex items-center justify-end gap-2 mt-1">
                 <span className="text-xs text-muted-foreground">
                   {holding.weight?.toFixed(1)}%

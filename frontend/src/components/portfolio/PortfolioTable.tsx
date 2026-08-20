@@ -31,12 +31,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
-import { cn } from '@/lib/utils';
+import { cn, formatMoney } from '@/lib/utils';
 import { AssetType, MarketRegion, HoldingWithAsset, GroupedHolding } from '@/lib/types';
 import { format } from 'date-fns';
 
 export function PortfolioTable() {
-  const { groupedHoldings, removeHolding, updateHolding } = usePortfolio();
+  const { groupedHoldings, removeHolding, updateHolding, baseCurrency } = usePortfolio();
   const [searchQuery, setSearchQuery] = useState('');
   const [assetTypeFilter, setAssetTypeFilter] = useState<string>('all');
   const [locationFilter, setLocationFilter] = useState<string>('all');
@@ -301,25 +301,24 @@ export function PortfolioTable() {
                           {group.totalQuantity.toLocaleString()}
                         </TableCell>
                         <TableCell className="text-right font-mono">
-                          ${group.avgCost.toFixed(2)}
+                          {formatMoney(group.avgCost, baseCurrency)}
                         </TableCell>
                         <TableCell className="text-right">
                           {group.currentPrice !== undefined ? (
-                            <span className="font-mono">${group.currentPrice.toFixed(2)}</span>
+                            <span className="font-mono">{formatMoney(group.currentPrice, baseCurrency)}</span>
                           ) : (
                             <span className="text-muted-foreground text-sm">N/A</span>
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <CurrencyDisplay value={group.marketValue ?? 0} size="sm" />
+                          <CurrencyDisplay value={group.marketValue ?? 0} currency={baseCurrency} size="sm" />
                         </TableCell>
                         <TableCell className="text-right">
                           <div className={cn(
                             'font-mono text-sm',
                             (group.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
                           )}>
-                            {(group.unrealizedPnL ?? 0) >= 0 ? '+' : ''}
-                            ${(group.unrealizedPnL ?? 0).toFixed(2)}
+                            {formatMoney(group.unrealizedPnL ?? 0, baseCurrency, true)}
                           </div>
                         </TableCell>
                         <TableCell className="text-right">
@@ -366,14 +365,14 @@ export function PortfolioTable() {
                                 {lot.quantity.toLocaleString()}
                               </TableCell>
                               <TableCell className="text-right font-mono text-sm">
-                                ${lot.avgCost.toFixed(2)}
+                                {formatMoney(lot.avgCost, lot.costCurrency)}
                               </TableCell>
                               <TableCell className="text-right text-sm text-muted-foreground">
                                 —
                               </TableCell>
                               <TableCell className="text-right">
                                 <span className="text-sm font-mono">
-                                  ${(lot.marketValue ?? 0).toFixed(2)}
+                                  {formatMoney(lot.marketValue ?? 0, baseCurrency)}
                                 </span>
                               </TableCell>
                               <TableCell className="text-right">
@@ -381,8 +380,7 @@ export function PortfolioTable() {
                                   'font-mono text-sm',
                                   (lot.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
                                 )}>
-                                  {(lot.unrealizedPnL ?? 0) >= 0 ? '+' : ''}
-                                  ${(lot.unrealizedPnL ?? 0).toFixed(2)}
+                                  {formatMoney(lot.unrealizedPnL ?? 0, baseCurrency, true)}
                                 </div>
                               </TableCell>
                               <TableCell className="text-right text-sm text-muted-foreground">

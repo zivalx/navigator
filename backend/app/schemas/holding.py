@@ -74,6 +74,7 @@ class HoldingWithAsset(HoldingLot):
     current_price: Optional[float] = Field(default=None, alias="currentPrice")
     price_change: Optional[float] = Field(default=None, alias="priceChange")
     price_change_percent: Optional[float] = Field(default=None, alias="priceChangePercent")
+    avg_cost_base: Optional[float] = Field(default=None, alias="avgCostBase")
     market_value: Optional[float] = Field(default=None, alias="marketValue")
     unrealized_pnl: Optional[float] = Field(default=None, alias="unrealizedPnL")
     unrealized_pnl_percent: Optional[float] = Field(default=None, alias="unrealizedPnLPercent")

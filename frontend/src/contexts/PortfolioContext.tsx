@@ -121,6 +121,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         currentPrice: h.currentPrice ?? h.current_price,
         priceChange: h.priceChange ?? h.price_change,
         priceChangePercent: h.priceChangePercent ?? h.price_change_percent,
+        avgCostBase: h.avgCostBase ?? h.avg_cost_base,
         marketValue: h.marketValue ?? h.market_value,
         unrealizedPnL: h.unrealizedPnL ?? h.unrealized_pnl,
         unrealizedPnLPercent: h.unrealizedPnLPercent ?? h.unrealized_pnl_percent,
@@ -225,22 +226,41 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     weight: totalNav > 0 && h.marketValue ? (h.marketValue / totalNav) * 100 : 0,
   }));
 
+  // Base-currency cost basis per lot. Falls back to the native avgCost only
+  // if the backend didn't supply avgCostBase (e.g. an older payload) — never
+  // sum the native avgCost across mixed cost currencies.
+  const costBaseOf = (h: HoldingWithAsset) =>
+    h.quantity * (h.avgCostBase ?? h.avgCost);
+
   // Portfolio summary
   const portfolioSummary: PortfolioSummary = useMemo(() => {
-    const dailyPnL = holdingsWithWeights.reduce((sum, h) => {
-      if (h.currentPrice && h.priceChange) {
-        return sum + (h.quantity * h.priceChange);
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    // Daily P&L only counts lots held at the previous close. A lot bought
+    // today didn't earn today's since-prev-close move (it was bought at
+    // today's price) — counting it would inflate the day's gain; its P&L vs
+    // its actual entry is captured in unrealized P&L instead. priceChange and
+    // currentPrice are already base-currency (converted by the backend), so
+    // `currentPrice - priceChange` is the base-currency previous close.
+    let dailyPnL = 0;
+    let prevNav = 0; // previous-close value of the lots that count above
+    for (const h of holdingsWithWeights) {
+      const heldAtPrevClose = new Date(h.purchaseDate) < startOfToday;
+      if (heldAtPrevClose && h.priceChange != null && h.currentPrice != null) {
+        dailyPnL += h.quantity * h.priceChange;
+        prevNav += h.quantity * (h.currentPrice - h.priceChange);
       }
-      return sum;
-    }, 0);
-    const totalCost = holdingsWithWeights.reduce((sum, h) => sum + (h.quantity * h.avgCost), 0);
+    }
+
+    const totalCost = holdingsWithWeights.reduce((sum, h) => sum + costBaseOf(h), 0);
     const totalUnrealizedPnL = holdingsWithWeights.reduce((sum, h) => sum + (h.unrealizedPnL || 0), 0);
 
     return {
       totalNav,
       baseCurrency,
       dailyPnL,
-      dailyPnLPercent: totalNav > 0 ? (dailyPnL / (totalNav - dailyPnL)) * 100 : 0,
+      dailyPnLPercent: prevNav > 0 ? (dailyPnL / prevNav) * 100 : 0,
       totalCost,
       totalUnrealizedPnL,
       totalUnrealizedPnLPercent: totalCost > 0 ? (totalUnrealizedPnL / totalCost) * 100 : 0,
@@ -259,7 +279,9 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     return Array.from(groups.entries()).map(([assetId, lots]) => {
       const asset = lots[0].asset;
       const totalQuantity = lots.reduce((sum, l) => sum + l.quantity, 0);
-      const totalCost = lots.reduce((sum, l) => sum + (l.quantity * l.avgCost), 0);
+      // Base-currency cost so the position's avgCost/% line up with its
+      // base-currency market value (mixed-currency lots don't corrupt it).
+      const totalCost = lots.reduce((sum, l) => sum + costBaseOf(l), 0);
       const avgCost = totalQuantity > 0 ? totalCost / totalQuantity : 0;
       const marketValue = lots.reduce((sum, l) => sum + (l.marketValue || 0), 0);
       const unrealizedPnL = lots.reduce((sum, l) => sum + (l.unrealizedPnL || 0), 0);

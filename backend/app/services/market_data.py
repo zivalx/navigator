@@ -2,7 +2,7 @@ from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..providers import PolygonProvider, FinnhubProvider, CoinGeckoProvider, YahooFinanceProvider, AlphaVantageProvider
 from ..cache import cache
@@ -112,15 +112,32 @@ class MarketDataService:
                 ).order_by(PriceSnapshot.timestamp.desc()).first()
 
             if last_price:
-                logger.warning("FALLBACK [%s]: all providers failed, returning DB cached price. Errors: %s", symbol, "; ".join(errors))
+                # Age of the snapshot — a very old close being served as the
+                # current price silently distorts NAV, so flag it rather than
+                # presenting it as a live quote with a real 0.00 daily change.
+                age_seconds = None
+                snap_ts = last_price.timestamp
+                if snap_ts is not None:
+                    if snap_ts.tzinfo is None:
+                        snap_ts = snap_ts.replace(tzinfo=timezone.utc)
+                    age_seconds = (datetime.now(timezone.utc) - snap_ts).total_seconds()
+                logger.warning(
+                    "FALLBACK [%s]: all providers failed, returning DB cached price "
+                    "(age %.0fs). Errors: %s",
+                    symbol,
+                    age_seconds if age_seconds is not None else -1,
+                    "; ".join(errors),
+                )
                 return {
                     "symbol": symbol,
                     "price": last_price.price,
-                    "change": 0,
-                    "changePercent": 0,
+                    "change": None,
+                    "changePercent": None,
                     "timestamp": last_price.timestamp,
                     "currency": last_price.currency.value,
                     "source": "db_cache",
+                    "stale": True,
+                    "ageSeconds": age_seconds,
                 }
 
             raise ValueError(f"Could not fetch quote for {symbol}. Errors: {'; '.join(errors)}")

@@ -127,10 +127,17 @@ export function CurrencyDisplay({ value, currency = 'USD', compact, size = 'md',
   const useCompact = compact ?? compactNumbers;
 
   const formatValue = () => {
-    if (useCompact) {
-      if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-      if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
-      if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
+    // Compact currency notation (e.g. "€1.2M") derives the symbol from the
+    // `currency` prop via Intl — the previous hand-rolled branch hardcoded
+    // "$" and mis-labeled every non-USD base currency. Math.abs so negative
+    // values (e.g. a P&L loss) compact and sign consistently with positives.
+    if (useCompact && Math.abs(value) >= 1000) {
+      return new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        style: 'currency',
+        currency,
+        maximumFractionDigits: 2,
+      }).format(value);
     }
     return new Intl.NumberFormat('en-US', {
       style: 'currency',

@@ -61,6 +61,20 @@ class PortfolioService:
                 "asset": holding.asset,
             }
 
+            # Cost basis in base currency — independent of the live quote, so
+            # compute it even if the quote fetch below fails. Exposed as
+            # avgCostBase so callers can aggregate cost without mixing the
+            # lot's native cost currency into a base-currency total.
+            try:
+                avg_cost_base = await self.fx_service.convert(
+                    holding.avg_cost,
+                    holding.cost_currency,
+                    self.base_currency,
+                )
+            except Exception:
+                avg_cost_base = holding.avg_cost
+            holding_dict["avgCostBase"] = avg_cost_base
+
             # Get current price
             try:
                 quote = await self.market_service.get_quote(
@@ -69,20 +83,21 @@ class PortfolioService:
                 )
 
                 current_price = quote["price"]
-                price_change = quote.get("change", 0)
-                price_change_percent = quote.get("changePercent", 0)
+                # change/changePercent are None on a stale db_cache fallback —
+                # treat unknown as 0 so it contributes nothing to daily P&L.
+                price_change = quote.get("change") or 0
+                price_change_percent = quote.get("changePercent") or 0
+                quote_currency = Currency(quote.get("currency", "USD"))
 
-                # Convert to base currency if needed
+                # Convert price and the daily change to base currency. The
+                # change is a per-share delta, so the same FX rate applies;
+                # leaving it native would make `quantity * priceChange` sums
+                # wrong for any non-base holding.
                 current_price_base = await self.fx_service.convert(
-                    current_price,
-                    Currency(quote.get("currency", "USD")),
-                    self.base_currency
+                    current_price, quote_currency, self.base_currency
                 )
-
-                avg_cost_base = await self.fx_service.convert(
-                    holding.avg_cost,
-                    holding.cost_currency,
-                    self.base_currency
+                price_change_base = await self.fx_service.convert(
+                    price_change, quote_currency, self.base_currency
                 )
 
                 market_value = current_price_base * holding.quantity
@@ -92,7 +107,7 @@ class PortfolioService:
 
                 holding_dict.update({
                     "currentPrice": current_price_base,
-                    "priceChange": price_change,
+                    "priceChange": price_change_base,
                     "priceChangePercent": price_change_percent,
                     "marketValue": market_value,
                     "unrealizedPnL": unrealized_pnl,
@@ -320,18 +335,36 @@ class PortfolioService:
 
     async def get_summary(self) -> PortfolioSummary:
         """Calculate portfolio summary with daily, weekly, and monthly P&L."""
-        grouped = await self.get_grouped_holdings()
+        holdings = await self.get_holdings_with_prices()
 
-        total_nav = 0
-        total_cost = 0
-
-        for holding in grouped:
-            if holding.market_value:
-                total_nav += holding.market_value
-            total_cost += holding.avg_cost * holding.total_quantity
+        total_nav = 0.0
+        total_cost = 0.0
+        for h in holdings:
+            if h.market_value:
+                total_nav += h.market_value
+            # Base-currency cost basis (avgCostBase), never the native avgCost,
+            # so mixed-currency lots don't corrupt the total.
+            if h.avg_cost_base is not None:
+                total_cost += h.avg_cost_base * h.quantity
 
         total_unrealized_pnl = total_nav - total_cost
         total_unrealized_pnl_percent = (total_unrealized_pnl / total_cost * 100) if total_cost else 0
+
+        def current_nav_of_lots_held_at(cutoff: datetime) -> float:
+            """Current market value of only the lots that already existed at
+            `cutoff`, so a lot bought after the cutoff can't inflate the P&L
+            delta by its full market value. (Both sides also require price
+            data — the current side a live quote, the historical side a
+            snapshot on/before the cutoff — so an asset with no snapshot yet
+            is still excluded from the historical NAV as before.)"""
+            cutoff = _ensure_aware(cutoff)
+            return sum(
+                h.market_value
+                for h in holdings
+                if h.market_value
+                and h.purchase_date is not None
+                and _ensure_aware(h.purchase_date) <= cutoff
+            )
 
         # Calculate daily/weekly/monthly P&L from historical snapshots
         daily_pnl = 0.0
@@ -342,33 +375,31 @@ class PortfolioService:
         try:
             now = datetime.now(timezone.utc)
 
-            # Daily: use the most recent EOD snapshot before today
-            yesterday_nav = await self._get_nav_at_date(
-                now - timedelta(days=1)
-            )
-            # If no data for 1 day ago, try up to 3 days back (weekends)
+            # Daily: most recent EOD snapshot before today; fall back up to 3
+            # days back for weekends/holidays, using whichever cutoff matched.
+            daily_cutoff = now - timedelta(days=1)
+            yesterday_nav = await self._get_nav_at_date(daily_cutoff)
             if yesterday_nav is None:
-                yesterday_nav = await self._get_nav_at_date(
-                    now - timedelta(days=3)
-                )
+                daily_cutoff = now - timedelta(days=3)
+                yesterday_nav = await self._get_nav_at_date(daily_cutoff)
 
             if yesterday_nav and yesterday_nav > 0:
-                daily_pnl = total_nav - yesterday_nav
+                daily_pnl = current_nav_of_lots_held_at(daily_cutoff) - yesterday_nav
                 daily_pnl_percent = (daily_pnl / yesterday_nav) * 100
 
             # Weekly: ~7 calendar days back (covers 5 trading days)
-            weekly_nav = await self._get_nav_at_date(
-                now - timedelta(days=7)
-            )
+            weekly_cutoff = now - timedelta(days=7)
+            weekly_nav = await self._get_nav_at_date(weekly_cutoff)
             if weekly_nav and weekly_nav > 0:
-                weekly_pnl_percent = ((total_nav - weekly_nav) / weekly_nav) * 100
+                weekly_delta = current_nav_of_lots_held_at(weekly_cutoff) - weekly_nav
+                weekly_pnl_percent = (weekly_delta / weekly_nav) * 100
 
             # Monthly: ~30 calendar days back (covers ~21 trading days)
-            monthly_nav = await self._get_nav_at_date(
-                now - timedelta(days=30)
-            )
+            monthly_cutoff = now - timedelta(days=30)
+            monthly_nav = await self._get_nav_at_date(monthly_cutoff)
             if monthly_nav and monthly_nav > 0:
-                monthly_pnl_percent = ((total_nav - monthly_nav) / monthly_nav) * 100
+                monthly_delta = current_nav_of_lots_held_at(monthly_cutoff) - monthly_nav
+                monthly_pnl_percent = (monthly_delta / monthly_nav) * 100
 
         except Exception as e:
             logger.warning("Error calculating P&L from snapshots: %s", e)

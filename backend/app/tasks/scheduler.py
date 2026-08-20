@@ -53,6 +53,14 @@ async def snapshot_eod_prices() -> None:
                 quote = await market_service.get_quote(
                     asset.symbol, asset.asset_type.value
                 )
+                # Don't record a stale db_cache fallback as a fresh EOD close —
+                # that would fabricate today's history from an old price.
+                if quote.get("stale"):
+                    logger.info(
+                        "EOD snapshot: skipping %s, only a stale price available",
+                        asset.symbol,
+                    )
+                    continue
                 snapshot = PriceSnapshot(
                     id=str(uuid.uuid4()),
                     asset_id=asset.id,

@@ -94,6 +94,7 @@ export interface HoldingWithAsset extends HoldingLot {
   currentPrice?: number;
   priceChange?: number;
   priceChangePercent?: number;
+  avgCostBase?: number;
   marketValue?: number;
   unrealizedPnL?: number;
   unrealizedPnLPercent?: number;
