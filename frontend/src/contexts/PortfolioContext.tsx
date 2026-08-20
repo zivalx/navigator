@@ -23,7 +23,7 @@ interface PortfolioContextType {
   watchlistWithAssets: WatchlistItemWithAsset[];
   watchedAssetIds: Set<string>;
   portfolioSummary: PortfolioSummary;
-  topHoldings: HoldingWithAsset[];
+  topHoldings: GroupedHolding[];
   topMovers: { gainers: MarketMover[]; losers: MarketMover[] };
 
   // Settings
@@ -248,13 +248,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     };
   }, [holdingsWithWeights, totalNav, baseCurrency, lastUpdated]);
 
-  // Top holdings by weight
-  const topHoldings = useMemo(() =>
-    [...holdingsWithWeights].sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 5),
-    [holdingsWithWeights]
-  );
-
-  // Grouped holdings
+  // Grouped holdings — one entry per asset, aggregating all its lots
   const groupedHoldings: GroupedHolding[] = useMemo(() => {
     const groups = new Map<string, HoldingWithAsset[]>();
     holdingsWithWeights.forEach(h => {
@@ -287,6 +281,13 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       };
     });
   }, [holdingsWithWeights]);
+
+  // Top holdings by weight — grouped per asset, so a symbol held across
+  // multiple lots (e.g. AAPL in two accounts) shows as one position.
+  const topHoldings = useMemo(() =>
+    [...groupedHoldings].sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 5),
+    [groupedHoldings]
+  );
 
   // Top movers — fetched from real market data API
   const [topMovers, setTopMovers] = useState<{ gainers: MarketMover[]; losers: MarketMover[] }>({ gainers: [], losers: [] });

@@ -16,8 +16,8 @@ export function TopHoldingsCard() {
       </h3>
       <div className="space-y-3">
         {topHoldings.map((holding, index) => (
-          <div 
-            key={holding.id}
+          <div
+            key={holding.assetId}
             className="flex items-center gap-4 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
             style={{ animationDelay: `${index * 50}ms` }}
           >
