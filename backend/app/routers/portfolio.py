@@ -57,6 +57,31 @@ async def get_portfolio_history(
     return result
 
 
+@router.get("/daily-pnl")
+async def get_portfolio_daily_pnl(
+    period: str = "3m",
+    base_currency: Currency = Currency.USD,
+    db: Session = Depends(get_db),
+):
+    """Stored flow-adjusted daily P&L + EOD NAV series for the dashboard bar chart."""
+    if period not in VALID_HISTORY_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period '{period}'. Must be one of {sorted(VALID_HISTORY_PERIODS)}",
+        )
+
+    cache_key = f"portfolio:daily-pnl:{period}:{base_currency.value}"
+    cached = await cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    portfolio_service = PortfolioService(db, base_currency=base_currency)
+    result = await portfolio_service.get_daily_pnl_series(period)
+
+    await cache.set(cache_key, result, ttl=HISTORY_CACHE_TTL_SECONDS)
+    return result
+
+
 @router.get("/holdings", response_model=List[schemas.HoldingWithAsset])
 async def get_holdings(
     base_currency: Currency = Currency.USD,

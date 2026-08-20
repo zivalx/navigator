@@ -7,13 +7,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import func
 
 from ..database import SessionLocal
-from ..models.asset import Asset
+from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
 from ..models.price import PriceSnapshot
+from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
+from ..services.portfolio import PortfolioService
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +86,30 @@ async def snapshot_eod_prices() -> None:
             success_count,
             error_count,
         )
+
+        # After per-asset EOD prices are stored, roll up today's portfolio row.
+        try:
+            svc = PortfolioService(db, base_currency=Currency.USD)
+            await svc.compute_daily_snapshot(datetime.now(timezone.utc).date())
+        except Exception as e:
+            logger.warning("Daily portfolio snapshot failed: %s", e)
     except Exception as e:
         logger.error("EOD snapshot job error: %s", e)
+    finally:
+        db.close()
+
+
+async def backfill_daily_snapshots_job() -> None:
+    """One-off: populate portfolio_snapshots from price history if empty."""
+    db = SessionLocal()
+    try:
+        if db.query(PortfolioSnapshot).first() is not None:
+            return  # already populated
+        svc = PortfolioService(db, base_currency=Currency.USD)
+        written = await svc.backfill_daily_snapshots()
+        logger.info("Daily P&L backfill wrote %d rows", written)
+    except Exception as e:
+        logger.error("Daily P&L backfill error: %s", e)
     finally:
         db.close()
 
@@ -378,6 +402,17 @@ def start_scheduler() -> None:
         run_date=datetime.now(timezone.utc) + timedelta(seconds=30),
         id="breadth_warm_start",
         name="Market Breadth Startup Warm-up",
+        replace_existing=True,
+    )
+
+    # Backfill the daily P&L series once, 45s after startup (after the price
+    # backfill at 15s has populated price_snapshots).
+    _scheduler.add_job(
+        backfill_daily_snapshots_job,
+        "date",
+        run_date=datetime.now(timezone.utc) + timedelta(seconds=45),
+        id="backfill_daily_pnl",
+        name="Daily P&L Series Backfill",
         replace_existing=True,
     )
 

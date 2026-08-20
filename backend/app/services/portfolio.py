@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from datetime import datetime, timedelta, timezone, time as dt_time, date as dat
 from ..models.holding import HoldingLot
 from ..models.asset import Asset
 from ..models.price import PriceSnapshot
+from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..schemas.holding import HoldingWithAsset, GroupedHolding
 from ..schemas.portfolio import PortfolioSummary
 from ..schemas.asset import Currency
@@ -416,3 +418,128 @@ class PortfolioService:
             totalUnrealizedPnLPercent=total_unrealized_pnl_percent,
             lastUpdated=datetime.now(),
         )
+
+    # ------------------------------------------------------------------
+    # Persisted daily P&L + EOD NAV series
+    # (spec: docs/superpowers/specs/2026-08-20-daily-pnl-series-design.md)
+    # ------------------------------------------------------------------
+
+    async def compute_daily_snapshot(self, day: date_cls) -> Optional[PortfolioSnapshot]:
+        """Compute and upsert the portfolio_snapshots row for `day`.
+
+        NAV is valued in USD at end of `day`; net_flow is the USD cost of lots
+        purchased on `day` (buys only); daily_pnl is flow-adjusted against the
+        most recent stored row before `day`. Idempotent (upsert on date)."""
+        end_of_day = datetime.combine(day, dt_time(23, 59, 59), tzinfo=timezone.utc)
+        holdings = self.db.query(HoldingLot).all()
+
+        # The stored series is canonically USD regardless of the service's
+        # configured base_currency.
+        usd = PortfolioService(self.db, base_currency=Currency.USD)
+        nav = await usd._get_nav_at_date(end_of_day, holdings=holdings)
+        if nav is None:
+            return None
+
+        net_flow = 0.0
+        for lot in holdings:
+            pd = lot.purchase_date
+            if pd is None:
+                continue
+            if _ensure_aware(pd).date() == day:
+                try:
+                    cost_usd = await usd.fx_service.convert(
+                        lot.avg_cost, Currency(lot.cost_currency), Currency.USD
+                    )
+                except Exception:
+                    cost_usd = lot.avg_cost
+                net_flow += cost_usd * lot.quantity
+
+        prev = (
+            self.db.query(PortfolioSnapshot)
+            .filter(PortfolioSnapshot.date < day)
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        prev_nav = prev.nav if prev else None
+
+        if prev_nav and prev_nav > 0:
+            daily_pnl = nav - prev_nav - net_flow
+            daily_pnl_pct = daily_pnl / prev_nav * 100
+        else:
+            daily_pnl = 0.0
+            daily_pnl_pct = 0.0
+
+        row = self.db.query(PortfolioSnapshot).filter_by(date=day).first()
+        if row is None:
+            row = PortfolioSnapshot(id=str(uuid.uuid4()), date=day)
+            self.db.add(row)
+        row.nav = nav
+        row.net_flow = net_flow
+        row.daily_pnl = daily_pnl
+        row.daily_pnl_pct = daily_pnl_pct
+        row.base_currency = "USD"
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    async def backfill_daily_snapshots(self) -> int:
+        """Build the daily series from every distinct date that has price
+        snapshots, oldest first. Idempotent (compute_daily_snapshot upserts)."""
+        date_rows = (
+            self.db.query(func.date(PriceSnapshot.timestamp))
+            .distinct()
+            .order_by(func.date(PriceSnapshot.timestamp))
+            .all()
+        )
+        written = 0
+        for (raw_date,) in date_rows:
+            if isinstance(raw_date, str):
+                day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            elif isinstance(raw_date, datetime):
+                day = raw_date.date()
+            elif isinstance(raw_date, date_cls):
+                day = raw_date
+            else:
+                continue
+            row = await self.compute_daily_snapshot(day)
+            if row is not None:
+                written += 1
+        return written
+
+    async def get_daily_pnl_series(self, period: str = DEFAULT_HISTORY_PERIOD) -> dict:
+        """Read the stored daily series within `period`, converting the USD
+        canonical values to the service's base currency for display."""
+        days = HISTORY_PERIOD_DAYS.get(period, HISTORY_PERIOD_DAYS[DEFAULT_HISTORY_PERIOD])
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=days)).date()
+
+        rows = (
+            self.db.query(PortfolioSnapshot)
+            .filter(PortfolioSnapshot.date >= start)
+            .order_by(PortfolioSnapshot.date)
+            .all()
+        )
+
+        async def to_display(usd_amount: float) -> float:
+            if self.base_currency == Currency.USD:
+                return usd_amount
+            try:
+                return await self.fx_service.convert(usd_amount, Currency.USD, self.base_currency)
+            except Exception:
+                return usd_amount
+
+        points = []
+        for r in rows:
+            points.append({
+                "date": r.date.isoformat(),
+                "nav": await to_display(r.nav),
+                "dailyPnL": await to_display(r.daily_pnl),
+                "dailyPnLPercent": r.daily_pnl_pct,
+                "netFlow": await to_display(r.net_flow),
+            })
+
+        return {
+            "base_currency": self.base_currency.value,
+            "period": period,
+            "points": points,
+        }
