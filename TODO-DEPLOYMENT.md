@@ -114,18 +114,46 @@ Two options (pick one):
 - [ ] **Option A: Cloudflare Origin Cert** — generate in Cloudflare, install in nginx (simplest)
 - [ ] **Option B: Let's Encrypt** — certbot with auto-renewal cron
 
-### 3.3 Password Protection (Cloudflare Access)
+### 3.3 Password Protection
 
-- [ ] Go to Cloudflare Zero Trust > Access > Applications
-- [ ] Add application: `navigator.zivalx.com`
-- [ ] Policy: allow your email(s) only
-- [ ] Auth method: one-time PIN to email (simplest) or Google OAuth
-- [ ] This adds a login page in front of the app — zero code changes needed
-- [ ] Free for up to 50 users
+**Implemented: nginx HTTP Basic Auth** — a single login gate in the nginx
+reverse proxy covers BOTH the frontend and `/api` (the backend has no auth of
+its own). It is self-protecting: because the check runs on the origin, even a
+direct `https://<vps-ip>/` hit needs the password, so it does not depend on a
+separate firewall to be safe. `/health` is intentionally exempt for probes.
 
-Alternative (no Cloudflare Access):
-- [ ] nginx basic auth (`htpasswd`) — simpler but less elegant
-- [ ] Add auth middleware to FastAPI — more work but app-level control
+Deploy steps (run on the VPS, in the repo dir, BEFORE `docker compose up`):
+
+```bash
+# 1. Create the credential file the nginx container mounts. -B = bcrypt.
+#    (apache2-utils provides htpasswd: `apt-get install -y apache2-utils`)
+htpasswd -B -c nginx/.htpasswd ziv        # prompts for a password
+#    add more users later WITHOUT -c:  htpasswd -B nginx/.htpasswd alice
+
+# 2. Confirm it exists and is a FILE (a missing file makes Docker mount a
+#    directory and nginx fails to start):
+test -f nginx/.htpasswd && echo ok
+
+# 3. Bring the stack up; nginx mounts it read-only at /etc/nginx/.htpasswd.
+docker compose -f docker-compose.prod.yml up -d
+```
+
+`nginx/.htpasswd` is gitignored — never commit it. To rotate, re-run
+`htpasswd -B nginx/.htpasswd ziv` and `docker compose restart nginx`.
+
+Also close the origin at the firewall so only 443 (+80 for ACME) is public:
+
+```bash
+ufw default deny incoming && ufw allow OpenSSH && ufw allow 80 && ufw allow 443 && ufw enable
+```
+
+**Optional upgrade — Cloudflare Tunnel + Access (nicer login, no open ports):**
+Run a `cloudflared` container that dials out to Cloudflare (so 80/443 can be
+closed entirely, killing any direct-IP path) and add a Zero Trust > Access
+application on `navigator.zivalx.com` with an email-OTP/Google policy. This
+composes on top of basic auth; add it later if you want a real login page.
+Note: Cloudflare Access **without** the tunnel is bypassable via the VPS IP —
+basic auth above does not have that weakness.
 
 ---
 

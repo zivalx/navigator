@@ -36,6 +36,13 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
+    # HTTP Basic Auth — single login gate covering both the frontend and the
+    # API (the backend itself has no auth). Set at the server level so every
+    # location inherits it; /health opts out below for container/uptime checks.
+    # Credentials live in /etc/nginx/.htpasswd (mounted from ./nginx/.htpasswd).
+    auth_basic "Navigator";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
     # API proxy
     location /api/ {
         limit_req zone=api burst=20 nodelay;
@@ -47,8 +54,9 @@ server {
         proxy_read_timeout 90s;
     }
 
-    # Health check endpoint (no rate limit)
+    # Health check endpoint (no rate limit, no auth — for uptime/LB probes)
     location = /health {
+        auth_basic off;
         proxy_pass http://api:7000;
         proxy_set_header Host $host;
     }

@@ -82,6 +82,10 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
+      # HTTP Basic Auth credentials — MUST be created on the host before
+      # `docker compose up` (see TODO-DEPLOYMENT.md 3.3), or Docker will create
+      # a directory here and nginx will fail to start.
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
       - frontend_build:/usr/share/nginx/html:ro
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro

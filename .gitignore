@@ -1,0 +1,7 @@
+# nginx HTTP Basic Auth credentials — created per-deploy, never committed.
+nginx/.htpasswd
+
+# Environment files (also covered by backend/.gitignore; belt-and-suspenders).
+.env
+.env.*
+!.env.example
