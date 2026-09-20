@@ -1,0 +1,63 @@
+#cloud-config
+# Navigator VPS first-boot provisioning (Phase 2.1 + 2.2 of TODO-DEPLOYMENT.md)
+# Passed via --user-data-from-file in scripts/provision.sh.
+# SSH key is injected into root by Hetzner (--ssh-key on server create).
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - git
+  - curl
+
+write_files:
+  # Security updates applied automatically, reboot at 04:00 if required
+  - path: /etc/apt/apt.conf.d/52-navigator-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+
+  - path: /etc/fail2ban/jail.local
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 5
+      bantime = 1h
+
+  # Log rotation for docker container logs (Phase 4.4)
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" }
+      }
+
+runcmd:
+  # SSH hardening: keys only, no passwords
+  - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+  - systemctl restart ssh
+
+  # Firewall: SSH, HTTP, HTTPS only
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow OpenSSH
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  - systemctl enable --now fail2ban
+
+  # Docker + compose plugin
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+
+  # Clone Navigator (public repo) — Phase 2.3 starts here
+  - git clone https://github.com/zivalx/navigator.git /opt/navigator
+
+final_message: "Navigator VPS provisioned. Docker $(docker --version 2>/dev/null || echo pending). Repo at /opt/navigator."
