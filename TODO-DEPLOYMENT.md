@@ -134,9 +134,15 @@ htpasswd -B -c nginx/.htpasswd ziv        # prompts for a password
 #    directory and nginx fails to start):
 test -f nginx/.htpasswd && echo ok
 
-# 3. Bring the stack up; nginx mounts it read-only at /etc/nginx/.htpasswd.
-docker compose -f docker-compose.prod.yml up -d
+# 3. Bring the stack up. IMPORTANT: pass --env-file .env.prod — the compose
+#    file interpolates ${DOMAIN}/${POSTGRES_*}/${REDIS_PASSWORD} from it, and
+#    compose only auto-loads a file literally named ".env", not ".env.prod".
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 ```
+
+> Use `--env-file .env.prod` for EVERY `docker compose ... -f docker-compose.prod.yml`
+> command (up, build, restart, logs). Without it, `${DOMAIN}` renders empty and
+> nginx fails to start.
 
 `nginx/.htpasswd` is gitignored — never commit it. To rotate, re-run
 `htpasswd -B nginx/.htpasswd ziv` and `docker compose restart nginx`.
