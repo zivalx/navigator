@@ -102,6 +102,18 @@ def test_mixed_cost_currency_gives_unknown_cost(db_session, monkeypatch):
     assert asset["held"] is True
 
 
+def test_cost_basis_uses_lot_currency_not_asset_currency(db_session, monkeypatch):
+    a = make_asset(db_session, "ADR", currency=Currency.EUR)
+    add_lot(db_session, a, 10, 100, cost_currency=Currency.USD)
+    add_lot(db_session, a, 10, 120, account="B", cost_currency=Currency.USD)
+    asset = get_export(db_session, monkeypatch).json()["assets"][0]
+    assert asset["currency"] == "EUR"
+    assert asset["avg_cost"] == 110.0
+    assert asset["avg_cost_currency"] == "USD"
+    assert asset["cost_basis_complete"] is True
+    assert asset["cost_basis_issue"] is None
+
+
 def test_zero_quantity_lots_ignored(db_session, monkeypatch):
     a = make_asset(db_session, "ZERO")
     add_lot(db_session, a, 0, 100)

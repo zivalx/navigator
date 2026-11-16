@@ -76,11 +76,14 @@ def _export_asset(asset: Asset, lots, watchlists) -> ExportedAsset:
         )
 
     first = min(l.purchase_date for l in positive).date().isoformat()
-    if all(l.cost_currency == asset.currency for l in positive):
+    # asset.currency is unreliable (e.g. ADRs seeded as EUR but bought in USD),
+    # so the cost basis only depends on the lots agreeing with each other.
+    lot_currencies = {_value(l.cost_currency) for l in positive}
+    if len(lot_currencies) == 1:
         avg_cost = sum(l.quantity * l.avg_cost for l in positive) / total_quantity
         return ExportedAsset(
             **base, held=True, total_quantity=total_quantity, avg_cost=avg_cost,
-            avg_cost_currency=_value(asset.currency), cost_basis_complete=True,
+            avg_cost_currency=lot_currencies.pop(), cost_basis_complete=True,
             cost_basis_issue=None, first_purchase_date=first,
         )
     return ExportedAsset(
