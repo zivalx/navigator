@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Positions export for trender (empty = endpoint disabled, returns 503)
+    export_token: str = ""
+
     # Cache TTL (seconds)
     quote_cache_ttl: int = 60
     news_cache_ttl: int = 900
