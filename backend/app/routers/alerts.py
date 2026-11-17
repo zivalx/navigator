@@ -24,6 +24,7 @@ from ..services.asset_identity import (
     SymbolNotFound,
     UnsupportedCurrency,
     derive_listing,
+    listing_http_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,12 +155,8 @@ async def _resolve_asset(asset_id: Optional[str], symbol: Optional[str], db: Ses
 
     try:
         listing = await derive_listing(symbol_upper)
-    except ListingUnavailable:
-        raise HTTPException(status_code=503, detail="couldn't verify symbol, try again")
-    except UnsupportedCurrency as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except SymbolNotFound:
-        raise HTTPException(status_code=404, detail="symbol not found")
+    except (ListingUnavailable, UnsupportedCurrency, SymbolNotFound) as e:
+        raise listing_http_error(e) from e
 
     region = listing.market_region
     if region is None:

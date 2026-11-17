@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 import httpx
+from fastapi import HTTPException
 
 from ..models.asset import Currency, MarketRegion
 from ..providers.yahoo import YahooFinanceProvider
@@ -46,7 +47,7 @@ async def derive_listing(symbol: str) -> ListingIdentity:
     provider = YahooFinanceProvider()
     try:
         meta = await provider.get_chart_meta(symbol)
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ValueError) as e:  # ValueError: non-JSON body
         logger.warning("listing lookup failed for %s: %s", symbol, type(e).__name__)
         raise ListingUnavailable() from e
     finally:
@@ -67,3 +68,12 @@ async def derive_listing(symbol: str) -> ListingIdentity:
         exchange=meta.get("fullExchangeName") or venue,
         market_region=VENUE_REGION.get(venue),
     )
+
+
+def listing_http_error(exc: Exception) -> HTTPException:
+    """Map a derive_listing failure to its HTTP response."""
+    if isinstance(exc, UnsupportedCurrency):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, SymbolNotFound):
+        return HTTPException(status_code=404, detail="symbol not found")
+    return HTTPException(status_code=503, detail="couldn't verify symbol, try again")

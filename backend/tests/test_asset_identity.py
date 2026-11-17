@@ -123,3 +123,21 @@ def test_alert_by_symbol_creates_tase_asset(api, db_session, monkeypatch):
     assert a.currency == "ILS"
     assert a.market_region == "IL"
     assert a.exchange == "Tel Aviv"
+
+
+def test_create_asset_non_json_yahoo_body_503(api, db_session, monkeypatch):
+    async def bad_body(self, symbol):
+        raise ValueError("Expecting value")
+
+    monkeypatch.setattr(YahooFinanceProvider, "get_chart_meta", bad_body)
+    r = api.post("/api/assets/", json=_body())
+    assert r.status_code == 503
+    assert r.json()["detail"] == "couldn't verify symbol, try again"
+    assert db_session.query(Asset).count() == 0
+
+
+def test_create_stock_ignores_client_exchange(api, monkeypatch):
+    _meta(monkeypatch, "ILS", "TLV", "Tel Aviv")
+    r = api.post("/api/assets/", json=_body(exchange="NASDAQ"))
+    assert r.status_code == 201, r.text
+    assert r.json()["exchange"] == "Tel Aviv"
