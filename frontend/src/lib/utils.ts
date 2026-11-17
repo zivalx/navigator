@@ -38,3 +38,14 @@ export function currencySymbol(code: string): string {
     return code;
   }
 }
+
+/** Short user-facing label for why a holding has no base-currency value. */
+export const UNAVAILABLE_REASON_LABELS: Record<string, string> = {
+  fx_unavailable: "no exchange rate",
+  lot_currency_check: "check lot currency",
+  price_unavailable: "no price",
+};
+
+export function unavailableReasonLabel(reason?: string | null): string {
+  return (reason && UNAVAILABLE_REASON_LABELS[reason]) || "value unavailable";
+}

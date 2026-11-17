@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import {
   Asset, HoldingLot, WatchlistItem, Watchlist, NewsItem, Currency,
-  HoldingWithAsset, WatchlistItemWithAsset, PortfolioSummary, Alert, MarketMover, GroupedHolding
+  HoldingWithAsset, WatchlistItemWithAsset, PortfolioSummary, Alert, MarketMover, GroupedHolding,
+  UnavailableReason
 } from '@/lib/types';
 import { api } from '@/lib/api';
 import { toast } from 'sonner';
@@ -25,6 +26,8 @@ interface PortfolioContextType {
   portfolioSummary: PortfolioSummary;
   topHoldings: GroupedHolding[];
   topMovers: { gainers: MarketMover[]; losers: MarketMover[] };
+  /** Holdings left out of every total (unique by symbol), with the reason. */
+  excludedHoldings: { symbol: string; reason: string }[];
 
   // Settings
   baseCurrency: Currency;
@@ -125,6 +128,8 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         marketValue: h.marketValue ?? h.market_value,
         unrealizedPnL: h.unrealizedPnL ?? h.unrealized_pnl,
         unrealizedPnLPercent: h.unrealizedPnLPercent ?? h.unrealized_pnl_percent,
+        valueUnavailable: Boolean(h.valueUnavailable ?? h.value_unavailable),
+        unavailableReason: (h.unavailableReason ?? h.unavailable_reason) || undefined,
       }));
 
       setHoldingsWithAssets(mappedHoldings);
@@ -219,20 +224,57 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   // Initial load
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Add weights to holdings
-  const totalNav = holdingsWithAssets.reduce((sum, h) => sum + (h.marketValue || 0), 0);
-  const holdingsWithWeights = holdingsWithAssets.map(h => ({
-    ...h,
-    weight: totalNav > 0 && h.marketValue ? (h.marketValue / totalNav) * 100 : 0,
-  }));
+  // Base-currency cost basis per lot, or null when it can't be expressed in
+  // the base currency. The native avgCost is only usable when it is already
+  // in the base currency (e.g. an older payload without avgCostBase) — never
+  // sum native costs across mixed currencies.
+  const costBaseOf = useCallback((h: HoldingWithAsset): number | null => {
+    if (h.avgCostBase != null) return h.quantity * h.avgCostBase;
+    return h.costCurrency === baseCurrency ? h.quantity * h.avgCost : null;
+  }, [baseCurrency]);
 
-  // Base-currency cost basis per lot. Falls back to the native avgCost only
-  // if the backend didn't supply avgCostBase (e.g. an older payload) — never
-  // sum the native avgCost across mixed cost currencies.
-  const costBaseOf = (h: HoldingWithAsset) =>
-    h.quantity * (h.avgCostBase ?? h.avgCost);
+  // Flag lots the browser can't value either (no base-currency cost, or no
+  // market value), then exclude every lot of an asset that has a flagged lot,
+  // so totals, weights and the per-asset rows all agree. Excluded holdings are
+  // listed (by symbol) for the dashboard banner instead of silently vanishing.
+  const { holdingsWithWeights, valuedHoldings, excludedAssetReasons, excludedHoldings, totalNav } = useMemo(() => {
+    const flagged: HoldingWithAsset[] = holdingsWithAssets.map(h => {
+      if (h.valueUnavailable) return h;
+      let reason: UnavailableReason | undefined;
+      if (costBaseOf(h) == null) reason = 'fx_unavailable';
+      else if (h.marketValue == null) reason = 'price_unavailable';
+      return reason ? { ...h, valueUnavailable: true, unavailableReason: reason } : h;
+    });
 
-  // Portfolio summary
+    const assetReasons = new Map<string, UnavailableReason>();
+    const bySymbol = new Map<string, string>();
+    for (const h of flagged) {
+      if (!h.valueUnavailable) continue;
+      const reason = h.unavailableReason ?? 'price_unavailable';
+      if (!assetReasons.has(h.assetId)) assetReasons.set(h.assetId, reason);
+      if (!bySymbol.has(h.asset.symbol)) bySymbol.set(h.asset.symbol, reason);
+    }
+
+    const valued = flagged.filter(h => !assetReasons.has(h.assetId));
+    const nav = valued.reduce((sum, h) => sum + (h.marketValue || 0), 0);
+    const valuedIds = new Set(valued.map(h => h.id));
+    const withWeights = flagged.map(h => ({
+      ...h,
+      weight: valuedIds.has(h.id)
+        ? (nav > 0 && h.marketValue ? (h.marketValue / nav) * 100 : 0)
+        : undefined,
+    }));
+
+    return {
+      holdingsWithWeights: withWeights,
+      valuedHoldings: withWeights.filter(h => valuedIds.has(h.id)),
+      excludedAssetReasons: assetReasons,
+      excludedHoldings: Array.from(bySymbol, ([symbol, reason]) => ({ symbol, reason })),
+      totalNav: nav,
+    };
+  }, [holdingsWithAssets, costBaseOf]);
+
+  // Portfolio summary — valued holdings only
   const portfolioSummary: PortfolioSummary = useMemo(() => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -245,7 +287,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     // `currentPrice - priceChange` is the base-currency previous close.
     let dailyPnL = 0;
     let prevNav = 0; // previous-close value of the lots that count above
-    for (const h of holdingsWithWeights) {
+    for (const h of valuedHoldings) {
       const heldAtPrevClose = new Date(h.purchaseDate) < startOfToday;
       if (heldAtPrevClose && h.priceChange != null && h.currentPrice != null) {
         dailyPnL += h.quantity * h.priceChange;
@@ -253,8 +295,8 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    const totalCost = holdingsWithWeights.reduce((sum, h) => sum + costBaseOf(h), 0);
-    const totalUnrealizedPnL = holdingsWithWeights.reduce((sum, h) => sum + (h.unrealizedPnL || 0), 0);
+    const totalCost = valuedHoldings.reduce((sum, h) => sum + (costBaseOf(h) ?? 0), 0);
+    const totalUnrealizedPnL = valuedHoldings.reduce((sum, h) => sum + (h.unrealizedPnL || 0), 0);
 
     return {
       totalNav,
@@ -266,9 +308,11 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       totalUnrealizedPnLPercent: totalCost > 0 ? (totalUnrealizedPnL / totalCost) * 100 : 0,
       lastUpdated,
     };
-  }, [holdingsWithWeights, totalNav, baseCurrency, lastUpdated]);
+  }, [valuedHoldings, costBaseOf, totalNav, baseCurrency, lastUpdated]);
 
-  // Grouped holdings — one entry per asset, aggregating all its lots
+  // Grouped holdings — one entry per asset, aggregating all its lots. An asset
+  // with any flagged lot is flagged as a whole (first flagged lot's reason)
+  // and carries no base-currency values, mirroring /portfolio/holdings/grouped.
   const groupedHoldings: GroupedHolding[] = useMemo(() => {
     const groups = new Map<string, HoldingWithAsset[]>();
     holdingsWithWeights.forEach(h => {
@@ -279,9 +323,25 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     return Array.from(groups.entries()).map(([assetId, lots]) => {
       const asset = lots[0].asset;
       const totalQuantity = lots.reduce((sum, l) => sum + l.quantity, 0);
+      const sortedLots = lots.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
+
+      const reason = excludedAssetReasons.get(assetId);
+      if (reason) {
+        return {
+          assetId,
+          asset,
+          lots: sortedLots,
+          totalQuantity,
+          avgCost: null,
+          priceChangePercent: lots[0].priceChangePercent,
+          valueUnavailable: true,
+          unavailableReason: reason,
+        };
+      }
+
       // Base-currency cost so the position's avgCost/% line up with its
       // base-currency market value (mixed-currency lots don't corrupt it).
-      const totalCost = lots.reduce((sum, l) => sum + costBaseOf(l), 0);
+      const totalCost = lots.reduce((sum, l) => sum + (costBaseOf(l) ?? 0), 0);
       const avgCost = totalQuantity > 0 ? totalCost / totalQuantity : 0;
       const marketValue = lots.reduce((sum, l) => sum + (l.marketValue || 0), 0);
       const unrealizedPnL = lots.reduce((sum, l) => sum + (l.unrealizedPnL || 0), 0);
@@ -290,7 +350,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       return {
         assetId,
         asset,
-        lots: lots.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime()),
+        lots: sortedLots,
         totalQuantity,
         avgCost,
         currentPrice: lots[0].currentPrice,
@@ -302,12 +362,16 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         weight,
       };
     });
-  }, [holdingsWithWeights]);
+  }, [holdingsWithWeights, excludedAssetReasons, costBaseOf]);
 
   // Top holdings by weight — grouped per asset, so a symbol held across
-  // multiple lots (e.g. AAPL in two accounts) shows as one position.
+  // multiple lots (e.g. AAPL in two accounts) shows as one position. Excluded
+  // assets have no weight and are left out.
   const topHoldings = useMemo(() =>
-    [...groupedHoldings].sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 5),
+    groupedHoldings
+      .filter(g => !g.valueUnavailable)
+      .sort((a, b) => (b.weight || 0) - (a.weight || 0))
+      .slice(0, 5),
     [groupedHoldings]
   );
 
@@ -555,6 +619,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       portfolioSummary,
       topHoldings,
       topMovers,
+      excludedHoldings,
       baseCurrency,
       setBaseCurrency,
       lastUpdated,
