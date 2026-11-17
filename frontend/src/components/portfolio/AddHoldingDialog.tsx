@@ -17,6 +17,7 @@ import {
 import { Plus, Upload, AlertCircle, CheckCircle, Home, Wallet } from 'lucide-react';
 import { Currency, AssetType } from '@/lib/types';
 import { api } from '@/lib/api';
+import { formatMoney } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export function AddHoldingDialog() {
@@ -483,7 +484,7 @@ export function CSVImportDialog() {
                       )}
                       <span className="font-semibold">{h.symbol}</span>
                       <span className="text-muted-foreground">
-                        {h.quantity} @ ${h.avgCost}
+                        {h.quantity} @ {h.costCurrency ? formatMoney(h.avgCost, h.costCurrency) : h.avgCost}
                       </span>
                     </div>
                     {!h.valid && (

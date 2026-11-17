@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Search, TrendingUp, TrendingDown, Settings, RotateCcw } from 'lucide-react';
 import { PercentChange } from '@/components/common/PriceDisplay';
-import { cn } from '@/lib/utils';
+import { cn, formatMoney } from '@/lib/utils';
 import type { MarketRegion } from '@/lib/types';
 import { MarketAssetCard } from './MarketAssetCard';
 import { AddMarketCardDialog } from './AddMarketCardDialog';
@@ -31,7 +31,7 @@ export function MarketsOverview() {
   const { gainers, losers } = useMemo(() => {
     const withChange = cards
       .filter(c => c.changePercent !== undefined && c.price !== undefined)
-      .map(c => ({ symbol: c.symbol, name: c.name, price: c.price!, change: c.changePercent! }));
+      .map(c => ({ symbol: c.symbol, name: c.name, price: c.price!, currency: c.currency || 'USD', change: c.changePercent! }));
     const sorted = [...withChange].sort((a, b) => b.change - a.change);
     return {
       gainers: sorted.filter(s => s.change > 0).slice(0, 5),
@@ -148,7 +148,7 @@ export function MarketsOverview() {
                   <span className="text-sm text-muted-foreground ml-2">{stock.name}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-mono">${stock.price.toFixed(2)}</span>
+                  <span className="font-mono">{formatMoney(stock.price, stock.currency)}</span>
                   <PercentChange value={stock.change} size="sm" className="ml-2" />
                 </div>
               </div>
@@ -175,7 +175,7 @@ export function MarketsOverview() {
                   <span className="text-sm text-muted-foreground ml-2">{stock.name}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-mono">${stock.price.toFixed(2)}</span>
+                  <span className="font-mono">{formatMoney(stock.price, stock.currency)}</span>
                   <PercentChange value={stock.change} size="sm" className="ml-2" />
                 </div>
               </div>
