@@ -35,6 +35,37 @@ def test_cutover_marker_written_once(db_session):
     assert get_marker(db_session, "missing") is None
 
 
+def _patch_session(db_session, monkeypatch):
+    import app.database as database
+    monkeypatch.setattr(database, "SessionLocal", lambda: db_session)
+    return database
+
+
+def test_ensure_cutover_marker_twice_keeps_first(db_session, monkeypatch):
+    from app.models.maintenance import CUTOVER_MARKER
+    database = _patch_session(db_session, monkeypatch)
+    database.ensure_cutover_marker()
+    first = get_marker(db_session, CUTOVER_MARKER)
+    database.ensure_cutover_marker()
+    assert db_session.query(MaintenanceRun).filter_by(name=CUTOVER_MARKER).count() == 1
+    assert get_marker(db_session, CUTOVER_MARKER) == first
+
+
+def test_ensure_cutover_marker_swallows_race(db_session, monkeypatch):
+    from app.models import maintenance
+    from app.models.maintenance import CUTOVER_MARKER
+    first = datetime(2026, 11, 17, 8, 0, tzinfo=timezone.utc)
+    set_marker(db_session, CUTOVER_MARKER, first)
+    database = _patch_session(db_session, monkeypatch)
+    # Existence check misses, so the insert collides with the other worker's row.
+    monkeypatch.setattr(db_session, "get", lambda *a, **k: None)
+    database.ensure_cutover_marker()  # must not raise
+    monkeypatch.undo()
+    rows = db_session.query(MaintenanceRun).filter_by(name=CUTOVER_MARKER).all()
+    assert len(rows) == 1
+    assert rows[0].ran_at.replace(tzinfo=timezone.utc) == first
+
+
 def test_snapshot_stores_ils(db_session):
     asset = Asset(id=str(uuid.uuid4()), symbol="TEVA.TA", name="Teva", exchange="TLV",
                   currency=Currency.ILS, asset_type=AssetType.STOCK,
@@ -67,8 +98,11 @@ def test_pg_migrate_enum_values_on_old_db():
     scoped = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     errors = []
 
+    barrier = threading.Barrier(2)
+
     def run():
         try:
+            barrier.wait(timeout=10)
             _migrate_enum_values(scoped)
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -87,6 +121,55 @@ def test_pg_migrate_enum_values_on_old_db():
             assert cur.count(code) == 1
         assert len(cur) == len(set(cur)) == 5 + len(NEW_CODES)
         assert reg.count("IL") == 1
+    finally:
+        scoped.dispose()
+        with admin.connect() as c:
+            c.exec_driver_sql(f"DROP SCHEMA {schema} CASCADE")
+        admin.dispose()
+
+
+@pytest.mark.skipif(not os.getenv("TEST_POSTGRES_URL"), reason="TEST_POSTGRES_URL not set")
+def test_pg_full_init_db_concurrent_on_old_db(monkeypatch):
+    from sqlalchemy import create_engine
+    import app.database as database
+    from app.models.maintenance import CUTOVER_MARKER
+
+    url = os.environ["TEST_POSTGRES_URL"]
+    schema = f"init_mig_{uuid.uuid4().hex[:8]}"
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        c.exec_driver_sql(f"CREATE SCHEMA {schema}")
+        c.exec_driver_sql(
+            f"CREATE TYPE {schema}.currency AS ENUM ('USD','EUR','GBP','JPY','CHF')")
+        c.exec_driver_sql(
+            f"CREATE TYPE {schema}.marketregion AS ENUM ('US','EU','ASIA')")
+    scoped = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    monkeypatch.setattr(database, "engine", scoped)
+    monkeypatch.setattr(database, "SessionLocal",
+                        database.sessionmaker(autocommit=False, autoflush=False, bind=scoped))
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def run():
+        try:
+            barrier.wait(timeout=10)
+            database.init_db()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    try:
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        assert not errors, errors
+        with admin.connect() as c:
+            cur = [r[0] for r in c.exec_driver_sql(
+                f"SELECT unnest(enum_range(NULL::{schema}.currency))::text")]
+            n = c.exec_driver_sql(
+                f"SELECT count(*) FROM {schema}.maintenance_runs WHERE name = '{CUTOVER_MARKER}'"
+            ).scalar()
+        assert len(cur) == len(set(cur)) == 5 + len(NEW_CODES)
+        assert n == 1
     finally:
         scoped.dispose()
         with admin.connect() as c:
