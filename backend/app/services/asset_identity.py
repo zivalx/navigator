@@ -42,6 +42,22 @@ class SymbolNotFound(Exception):
     """Yahoo has no data for the symbol."""
 
 
+def identity_from_meta(symbol: str, meta: dict) -> ListingIdentity:
+    """Build the listing identity from Yahoo chart meta (pure)."""
+    code = meta.get("currency")
+    try:
+        currency = Currency(code)
+    except ValueError:
+        raise UnsupportedCurrency(str(code), symbol)
+
+    venue = meta.get("exchangeName")
+    return ListingIdentity(
+        currency=currency,
+        exchange=meta.get("fullExchangeName") or venue,
+        market_region=VENUE_REGION.get(venue),
+    )
+
+
 async def derive_listing(symbol: str) -> ListingIdentity:
     symbol = symbol.upper()
     provider = YahooFinanceProvider()
@@ -55,19 +71,7 @@ async def derive_listing(symbol: str) -> ListingIdentity:
 
     if meta is None:
         raise SymbolNotFound()
-
-    code = meta.get("currency")
-    try:
-        currency = Currency(code)
-    except ValueError:
-        raise UnsupportedCurrency(str(code), symbol)
-
-    venue = meta.get("exchangeName")
-    return ListingIdentity(
-        currency=currency,
-        exchange=meta.get("fullExchangeName") or venue,
-        market_region=VENUE_REGION.get(venue),
-    )
+    return identity_from_meta(symbol, meta)
 
 
 def listing_http_error(exc: Exception) -> HTTPException:
