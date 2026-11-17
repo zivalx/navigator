@@ -210,14 +210,18 @@ async def test_skipped_asset_with_legacy_alert_blocks_apply(db_session, yahoo, b
     (None, "symbol not found"),
     ({"currency": "BRL", "exchangeName": "SAO"}, "unsupported currency BRL"),
 ])
-async def test_skip_without_legacy_data_still_applies_but_is_incomplete(db_session, yahoo, bad, reason):
+async def test_skip_without_legacy_data_still_applies_and_completes(db_session, yahoo, bad, reason):
+    """A skipped listing with nothing to convert doesn't block or fail the
+    apply; the output still names it."""
     _setup(db_session)
     yahoo["GONE"] = bad
     make_asset(db_session, symbol="GONE")
     out = io.StringIO()
     report = await audit(db_session, apply=True, out=out)
-    assert f"GONE: skipped ({reason})" in out.getvalue()
-    assert not report.aborted and report.incomplete and report.skipped == ["GONE"]
+    text = out.getvalue()
+    assert f"GONE: skipped ({reason})" in text
+    assert "skipped (not verified, not changed): GONE" in text
+    assert not report.aborted and not report.incomplete and report.skipped == ["GONE"]
     assert get_marker(db_session, ALERTS_CONVERTED_MARKER) is not None
 
 
@@ -235,7 +239,8 @@ def test_main_exit_codes(monkeypatch):
     import scripts.audit_asset_currencies as m
     from app.database import SessionLocal  # noqa: F401
 
-    for report, code in [(m.AuditReport(), 0), (m.AuditReport(incomplete=True), 1),
+    for report, code in [(m.AuditReport(), 0), (m.AuditReport(skipped=["GONE"]), 0),
+                         (m.AuditReport(incomplete=True), 1),
                          (m.AuditReport(aborted=True), 1)]:
         async def fake(db, *, apply, out, r=report):
             return r

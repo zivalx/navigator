@@ -134,8 +134,14 @@ enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_mig
 - **Audit script + deploy order**: `docker compose exec api python -m scripts.audit_asset_currencies`
   is a dry run (prints symbols/codes/counts only); `--apply` fixes asset
   currency/region/exchange and converts pre-cutover alert/watch-target prices x0.01 once.
-  It never changes lots and exits 1 if a listing can't be verified and has legacy price
-  rows. Deploy Navigator first -> audit dry run -> `--apply` -> then trender.
+  It never changes lots. `--apply` exits 0 once its writes are committed and the
+  conversion marker is written (or already present), even if some listings were skipped
+  (they are listed as `skipped (not verified, not changed): ...`); it exits 1 and writes
+  nothing if Yahoo was unreachable or a skipped listing still has legacy price rows, and
+  exits 1 if there is no cutover marker (nothing could be converted).
+  Deploy Navigator first -> audit dry run -> `--apply` -> then trender.
+  Don't edit price alerts or watchlist targets between deploy and `--apply`; pre-cutover
+  rows are converted ×0.01 by creation time.
   `POST /assets/` for stock/etf/fund derives currency/exchange/region from Yahoo (503 if
   unreachable, 422 unsupported currency). Spec: `docs/superpowers/specs/2026-11-17-tase-ils-support-design.md`.
 - Ports: backend 7000, frontend dev 7070 (not the 8000/5173 in the older docs).

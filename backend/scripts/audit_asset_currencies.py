@@ -43,7 +43,7 @@ class AuditReport:
     minor_unit_symbols: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     aborted: bool = False  # nothing was written
-    incomplete: bool = False  # --apply did not complete every step
+    incomplete: bool = False  # --apply could not convert (no cutover marker) or aborted
 
 
 def _utc(dt: datetime) -> datetime:
@@ -173,7 +173,13 @@ async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
                 print(f"{asset.symbol}: {len(alerts)} alert(s), {len(targets)} watch target(s) "
                       "not converted (listing unknown) - delete or edit them, then re-run", file=out)
 
-    report.incomplete = bool(report.skipped) or cutover is None
+    # Skipped listings without legacy price data don't make the apply
+    # incomplete (nothing of theirs needs converting); they are listed so
+    # they can be checked by hand. No cutover marker means nothing could be
+    # converted, so the apply is incomplete.
+    report.incomplete = cutover is None
+    if report.skipped:
+        print(f"skipped (not verified, not changed): {', '.join(report.skipped)}", file=out)
 
     if not apply:
         print(f"dry run: {len(report.asset_fixes)} asset(s) to fix, "
