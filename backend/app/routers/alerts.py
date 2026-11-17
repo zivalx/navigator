@@ -16,10 +16,15 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models.alert import AlertIntent, AlertRule, PriceAlert
-from ..models.asset import Asset, AssetType, Currency, MarketRegion
+from ..models.asset import Asset, AssetType, MarketRegion
 from ..services import alerts as alerts_service
 from ..services.alerts import AlertSeedError, AlertValidationError
-from ..services.market_data import MarketDataService
+from ..services.asset_identity import (
+    ListingUnavailable,
+    SymbolNotFound,
+    UnsupportedCurrency,
+    derive_listing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,26 +152,28 @@ async def _resolve_asset(asset_id: Optional[str], symbol: Optional[str], db: Ses
     if asset:
         return asset
 
-    # Best-effort enrichment from live market data; fall back to sane
-    # defaults if the quote can't be fetched (e.g. unknown/offline symbol).
-    currency_value = Currency.USD
     try:
-        market_service = MarketDataService(db)
-        quote = await market_service.get_quote(symbol_upper)
-        try:
-            currency_value = Currency(quote.get("currency", "USD"))
-        except ValueError:
-            currency_value = Currency.USD
-    except Exception:
-        pass
+        listing = await derive_listing(symbol_upper)
+    except ListingUnavailable:
+        raise HTTPException(status_code=503, detail="couldn't verify symbol, try again")
+    except UnsupportedCurrency as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except SymbolNotFound:
+        raise HTTPException(status_code=404, detail="symbol not found")
+
+    region = listing.market_region
+    if region is None:
+        logger.warning("unknown venue %s for %s", listing.exchange, symbol_upper)
+        region = MarketRegion.US
 
     asset = Asset(
         id=str(uuid.uuid4()),
         symbol=symbol_upper,
         name=symbol_upper,
-        currency=currency_value,
+        exchange=listing.exchange,
+        currency=listing.currency,
         asset_type=AssetType.STOCK,
-        market_region=MarketRegion.US,
+        market_region=region,
     )
     db.add(asset)
     db.commit()

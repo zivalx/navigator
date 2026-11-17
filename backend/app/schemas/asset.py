@@ -43,9 +43,9 @@ class AssetBase(BaseModel):
     symbol: str
     name: str
     exchange: Optional[str] = None
-    currency: Currency
+    currency: Optional[Currency] = None
     asset_type: AssetType = Field(alias="assetType")
-    market_region: MarketRegion = Field(alias="marketRegion")
+    market_region: Optional[MarketRegion] = Field(default=None, alias="marketRegion")
     provider_ids: Optional[Dict[str, str]] = Field(default=None, alias="providerIds")
 
     class Config:
@@ -73,6 +73,8 @@ class AssetUpdate(BaseModel):
 
 class Asset(AssetBase):
     id: str
+    currency: Currency
+    market_region: MarketRegion = Field(alias="marketRegion")
 
     class Config:
         from_attributes = True
