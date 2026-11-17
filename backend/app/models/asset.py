@@ -16,6 +16,7 @@ class MarketRegion(str, enum.Enum):
     US = "US"
     EU = "EU"
     ASIA = "ASIA"
+    IL = "IL"
 
 
 class Currency(str, enum.Enum):
@@ -24,6 +25,19 @@ class Currency(str, enum.Enum):
     GBP = "GBP"
     JPY = "JPY"
     CHF = "CHF"
+    ILS = "ILS"
+    HKD = "HKD"
+    CNY = "CNY"
+    KRW = "KRW"
+    TWD = "TWD"
+    SGD = "SGD"
+    INR = "INR"
+    SEK = "SEK"
+    DKK = "DKK"
+    NOK = "NOK"
+    AUD = "AUD"
+    CAD = "CAD"
+    ZAR = "ZAR"
 
 
 class Asset(Base):

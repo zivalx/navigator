@@ -5,6 +5,7 @@ from .price import PriceSnapshot, FxRate
 from .news import NewsItem
 from .alert import PriceAlert, AlertRule
 from .portfolio_snapshot import PortfolioSnapshot
+from .maintenance import MaintenanceRun
 
 __all__ = [
     "Asset",
@@ -18,4 +19,5 @@ __all__ = [
     "PriceAlert",
     "AlertRule",
     "PortfolioSnapshot",
+    "MaintenanceRun",
 ]

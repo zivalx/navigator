@@ -104,7 +104,6 @@ async def test_quote_cache_key_is_v2(db_session, monkeypatch):
     assert keys == ["quote:v2:TEVA.TA"]
 
 
-@pytest.mark.xfail(strict=True, reason="needs Currency.ILS from Task 2")
 @pytest.mark.asyncio
 async def test_backfill_closes_normalized(db_session, monkeypatch):
     from app.tasks import scheduler as scheduler_module

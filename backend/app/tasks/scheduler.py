@@ -195,7 +195,7 @@ async def backfill_historical_prices() -> None:
                             PriceSnapshot(
                                 id=str(uuid.uuid4()),
                                 asset_id=asset.id,
-                                price=close * factor,
+                                price=round(close * factor, 6) if factor != 1.0 else close,
                                 currency=currency,
                                 timestamp=datetime.fromtimestamp(
                                     ts, tz=timezone.utc
