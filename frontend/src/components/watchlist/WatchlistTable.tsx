@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { usePortfolio } from '@/contexts/PortfolioContext';
-import { api } from '@/lib/api';
+import { api, buildCreateAssetPayload, assetCreateErrorMessage } from '@/lib/api';
 import { PercentChange } from '@/components/common/PriceDisplay';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -121,15 +121,7 @@ export function WatchlistTable() {
           assetId = existing.id;
         } catch {
           // Not found — create it
-          const created = await api.createAsset({
-            symbol: asset.symbol,
-            name: asset.name,
-            exchange: asset.exchange || '',
-            currency: asset.currency || 'USD',
-            asset_type: asset.assetType || asset.asset_type || 'stock',
-            market_region: asset.marketRegion || asset.market_region || 'US',
-            provider_ids: {},
-          });
+          const created = await api.createAsset(buildCreateAssetPayload(asset));
           assetId = created.id;
         }
       }
@@ -137,7 +129,7 @@ export function WatchlistTable() {
       addToWatchlist(assetId);
       toast.success(`Added ${asset.symbol} to ${activeWatchlist?.name || 'watchlist'}`);
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to add symbol');
+      toast.error(assetCreateErrorMessage(err, err?.message || 'Failed to add symbol'));
     }
     setAddDialogOpen(false);
     setSymbolSearch('');

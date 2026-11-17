@@ -12,12 +12,55 @@ import type {
 
 const BASE = "/api";
 
+export class ApiError extends Error {
+  status: number;
+  detail?: string;
+  constructor(status: number, body: string) {
+    super(`API ${status}: ${body}`);
+    this.status = status;
+    try {
+      const d = JSON.parse(body)?.detail;
+      if (typeof d === "string") this.detail = d;
+    } catch {
+      /* body is not JSON */
+    }
+  }
+}
+
+/** Payload for POST /assets/. Stock/ETF/fund listing identity (currency, region) is derived by the backend. */
+export function buildCreateAssetPayload(asset: {
+  symbol: string;
+  name: string;
+  exchange?: string;
+  assetType?: string;
+  asset_type?: string;
+}) {
+  const assetType = asset.assetType || asset.asset_type || "stock";
+  const base = {
+    symbol: asset.symbol,
+    name: asset.name,
+    exchange: asset.exchange || "",
+    asset_type: assetType,
+    provider_ids: {},
+  };
+  return assetType === "crypto" ? { ...base, currency: "USD", market_region: "US" } : base;
+}
+
+/** User-facing message for a failed asset creation. */
+export function assetCreateErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    if (err.status === 503) return "Couldn't verify symbol, try again";
+    if (err.status === 422 && err.detail) return err.detail;
+  }
+  return fallback;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new ApiError(res.status, await res.text());
   if (res.status === 204 || res.headers.get("content-length") === "0") {
     return undefined as T;
   }

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Search, Star, Loader2, Check } from 'lucide-react';
 import { Input } from '@/components/ui/input';
-import { api } from '@/lib/api';
+import { api, buildCreateAssetPayload, assetCreateErrorMessage } from '@/lib/api';
 import { usePortfolio } from '@/contexts/PortfolioContext';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -135,15 +135,7 @@ export function GlobalSearch() {
       const existing = await api.getAssetBySymbol(asset.symbol);
       return existing.id;
     } catch {
-      const created = await api.createAsset({
-        symbol: asset.symbol,
-        name: asset.name,
-        exchange: asset.exchange || '',
-        currency: asset.currency || 'USD',
-        asset_type: asset.asset_type || 'stock',
-        market_region: 'US',
-        provider_ids: {},
-      });
+      const created = await api.createAsset(buildCreateAssetPayload(asset));
       return created.id;
     }
   };
@@ -174,8 +166,8 @@ export function GlobalSearch() {
       addToWatchlist(assetId, watchlistId);
       const wlName = watchlists.find(w => w.id === watchlistId)?.name || 'watchlist';
       toast.success(`Added ${asset.symbol} to ${wlName}`);
-    } catch {
-      toast.error('Failed to add to watchlist');
+    } catch (err) {
+      toast.error(assetCreateErrorMessage(err, 'Failed to add to watchlist'));
     }
     setPickerAsset(null);
   };
@@ -243,6 +235,7 @@ export function GlobalSearch() {
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {asset.asset_type !== 'index' && (
                     <button
                       onClick={(e) => handleStarClick(e, asset)}
                       className={cn(
@@ -255,6 +248,7 @@ export function GlobalSearch() {
                     >
                       <Star className={cn('h-4 w-4', watched && 'fill-current')} />
                     </button>
+                    )}
                   </div>
                 </div>
               );
