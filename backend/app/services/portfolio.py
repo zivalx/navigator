@@ -41,12 +41,18 @@ def _currency_code(value) -> str:
     return getattr(value, "value", value)
 
 
-def _is_lot_currency_check(lot) -> bool:
-    """An ILS asset with a non-ILS lot: the known result of the old USD
-    default, so the recorded cost is really shekels (spec 6.4)."""
-    return (
-        _currency_code(lot.asset.currency) == Currency.ILS.value
-        and _currency_code(lot.cost_currency) != Currency.ILS.value
+def _is_lot_currency_check(lot, price_currency=None) -> bool:
+    """A non-ILS lot on an ILS listing: the known result of the old USD
+    default, so the recorded cost is really shekels (spec 6.4).
+
+    The listing is ILS when the stored asset currency says so or, before the
+    audit has fixed an old TASE asset still labelled USD, when its price
+    (live quote, or latest stored snapshot) is in ILS."""
+    if _currency_code(lot.cost_currency) == Currency.ILS.value:
+        return False
+    return Currency.ILS.value in (
+        _currency_code(lot.asset.currency),
+        _currency_code(price_currency) if price_currency is not None else None,
     )
 
 
@@ -93,7 +99,9 @@ class PortfolioService:
         1. ILS asset with a non-ILS lot -> lot_currency_check
         2. cost->base FX conversion raises -> fx_unavailable
         3. the quote raises -> price_unavailable
-        4. quote currency is not a Currency member, or price->base FX
+        4. ILS quote with a non-ILS lot (asset label not yet fixed by the
+           audit) -> lot_currency_check
+        5. quote currency is not a Currency member, or price->base FX
            conversion raises -> fx_unavailable
         """
         symbol = holding.asset.symbol
@@ -129,6 +137,9 @@ class PortfolioService:
                 raise ValueError("quote has no price")
         except Exception as e:
             return unavailable("price_unavailable", detail=e)
+
+        if _is_lot_currency_check(holding, price_currency=quote.get("currency")):
+            return unavailable("lot_currency_check")
 
         # change/changePercent are None on a stale db_cache fallback —
         # treat unknown as 0 so it contributes nothing to daily P&L.
@@ -245,6 +256,11 @@ class PortfolioService:
             ))
 
         return result
+
+    def _latest_price_currency(self, asset_id: str, when: datetime):
+        """Currency of the asset's latest stored price on/before `when`, if any."""
+        snap = self._latest_snapshot(asset_id, when)
+        return snap.currency if snap is not None else None
 
     def _latest_snapshot(self, asset_id: str, when: datetime) -> Optional[PriceSnapshot]:
         """Most recent PriceSnapshot for an asset on or before `when`."""
@@ -548,8 +564,12 @@ class PortfolioService:
         # A lot_currency_check lot's recorded cost is not in its labelled
         # currency, so it can't enter net_flow. Its NAV (price-based) is fine,
         # so only its purchase day is skipped.
+        # No live quote here: the latest stored price's currency stands in
+        # for it (an ILS price reveals a TASE asset still labelled USD).
         unchecked = sorted({
-            lot.asset.symbol for lot in bought_today if _is_lot_currency_check(lot)
+            lot.asset.symbol for lot in bought_today
+            if _is_lot_currency_check(lot, price_currency=self._latest_price_currency(
+                lot.asset_id, end_of_day))
         })
         if unchecked:
             logger.warning(

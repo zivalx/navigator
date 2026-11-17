@@ -523,3 +523,69 @@ async def test_daily_snapshot_skipped_when_prev_price_has_no_rate(
         r.getMessage() == f"skipping portfolio snapshot for {day}: no FX rate for EUR"
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# Pre-audit TASE asset still labelled USD: the ILS quote reveals the listing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_usd_labelled_asset_with_ils_quote_is_lot_currency_check(db_session, rates, quotes):
+    """Before audit --apply an old TASE asset can still say USD; its USD lot
+    holds a shekel cost. The live ILS quote must flag the lot, not value a
+    shekel cost as dollars."""
+    stale = make_asset(db_session, symbol="TEVA.TA")  # USD label (pre-audit)
+    make_lot(db_session, stale, 10, 60.0, Currency.USD)
+    quotes["TEVA.TA"] = ils_quote(65.12)
+    rates[("ILS", "USD")] = 0.27
+
+    [h] = await PortfolioService(db_session, base_currency=Currency.USD).get_holdings_with_prices()
+
+    assert h.value_unavailable is True
+    assert h.unavailable_reason == "lot_currency_check"
+    assert_base_fields_null(h)
+
+
+@pytest.mark.asyncio
+async def test_summary_excludes_usd_labelled_asset_with_ils_quote(db_session, rates, quotes):
+    usd = make_asset(db_session, symbol="AAPL")
+    make_lot(db_session, usd, 10, 50.0, Currency.USD)
+    quotes["AAPL"] = usd_quote(price=100.0)
+
+    stale = make_asset(db_session, symbol="TEVA.TA")  # USD label (pre-audit)
+    make_lot(db_session, stale, 10, 60.0, Currency.USD)
+    quotes["TEVA.TA"] = ils_quote(65.12)
+    rates[("ILS", "USD")] = 0.27
+
+    summary = await PortfolioService(db_session, base_currency=Currency.USD).get_summary()
+
+    assert summary.total_nav == pytest.approx(1000.0)
+    assert summary.total_cost == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_daily_snapshot_skipped_on_purchase_day_of_usd_labelled_ils_listing(
+    db_session, rates, quotes, caplog
+):
+    """compute_daily_snapshot has no live quote: the asset's latest stored
+    price currency (ILS) reveals the listing, so the shekel cost labelled USD
+    never reaches net_flow."""
+    buy_day = (NOW - dt.timedelta(days=3)).date()
+    rates[("ILS", "USD")] = 0.27
+
+    stale = make_asset(db_session, symbol="TEVA.TA")  # USD label (pre-audit)
+    make_lot(db_session, stale, 10, 60.0, Currency.USD,
+             purchase_date=dt.datetime.combine(buy_day, dt.time(10, 0), tzinfo=dt.timezone.utc))
+    make_snapshot(db_session, stale, 65.0, Currency.ILS,
+                  dt.datetime.combine(buy_day, dt.time(23, 0), tzinfo=dt.timezone.utc))
+
+    service = PortfolioService(db_session, base_currency=Currency.USD)
+    with caplog.at_level(logging.WARNING, logger="app.services.portfolio"):
+        row = await service.compute_daily_snapshot(buy_day)
+
+    assert row is None
+    assert db_session.query(PortfolioSnapshot).count() == 0
+    assert any(
+        r.getMessage() == f"skipping portfolio snapshot for {buy_day}: lot currency check for TEVA.TA"
+        for r in caplog.records
+    )
