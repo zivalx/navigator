@@ -36,7 +36,7 @@ interface CreateAlertDialogProps {
   editAlert?: PriceAlert | null;
 }
 
-type SearchResult = { id?: string; symbol: string; name?: string; currency?: string };
+type SearchResult = { id?: string; symbol: string; name?: string };
 type TrailType = 'percent' | 'amount';
 type IntentChoice = 'none' | PriceAlertIntent;
 
@@ -114,13 +114,17 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
 
   const handleSelectSearchResult = async (result: SearchResult) => {
     let currentPrice: number | undefined;
+    // Search hits carry no currency: take it from the quote. Without one, the
+    // dialog falls back to the known asset's currency, then USD.
+    let currency: string | undefined;
     try {
       const quote = await api.getQuote(result.symbol);
       currentPrice = quote?.price;
+      currency = quote?.currency ?? undefined;
     } catch {
       // Presets just won't be available; the user can still enter a threshold manually.
     }
-    setSelectedAsset({ assetId: result.id, symbol: result.symbol, name: result.name, currentPrice, currency: result.currency });
+    setSelectedAsset({ assetId: result.id, symbol: result.symbol, name: result.name, currentPrice, currency });
     setSymbolQuery('');
     setSearchResults([]);
   };

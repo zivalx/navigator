@@ -140,3 +140,16 @@ async def test_backfill_closes_normalized(db_session, monkeypatch):
     )
     assert [r.price for r in rows] == pytest.approx([64.0, 65.12])
     assert all(r.currency == Currency.ILS for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_invent_usd_currency():
+    """Yahoo search results carry no currency; a TASE hit must not come
+    back labelled USD (callers take the currency from the quote)."""
+    body = {"quotes": [
+        {"symbol": "TEVA.TA", "shortname": "TEVA", "exchange": "TLV", "quoteType": "EQUITY"},
+    ]}
+    provider = _provider(lambda req: httpx.Response(200, json=body))
+    [hit] = await provider.search("teva")
+    assert hit["symbol"] == "TEVA.TA"
+    assert hit["currency"] is None

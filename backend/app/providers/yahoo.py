@@ -206,7 +206,9 @@ class YahooFinanceProvider(BaseProvider):
                 "name": quote.get("shortname") or quote.get("longname", ""),
                 "exchange": quote.get("exchange", ""),
                 "asset_type": asset_type,
-                "currency": quote.get("currency", "USD"),
+                # Search hits carry no currency; never invent one (the
+                # quote / asset record is the source of truth).
+                "currency": quote.get("currency"),
             })
 
         return results

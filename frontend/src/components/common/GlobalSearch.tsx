@@ -12,7 +12,8 @@ interface SearchResult {
   name: string;
   exchange?: string;
   asset_type: string;
-  currency: string;
+  /** Unknown (null) for API search hits: Yahoo search returns no currency. */
+  currency?: string | null;
   id?: string;
 }
 
