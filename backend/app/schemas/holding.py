@@ -1,7 +1,10 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import datetime
 from .asset import Currency, Asset
+
+# Why a holding has no base-currency value (spec 6.4/6.5, plan Ruling 1).
+UnavailableReason = Literal["fx_unavailable", "lot_currency_check", "price_unavailable"]
 
 
 class HoldingLotBase(BaseModel):
@@ -79,6 +82,10 @@ class HoldingWithAsset(HoldingLot):
     unrealized_pnl: Optional[float] = Field(default=None, alias="unrealizedPnL")
     unrealized_pnl_percent: Optional[float] = Field(default=None, alias="unrealizedPnLPercent")
     weight: Optional[float] = None
+    # When set, every base-currency field above is None and the holding is
+    # excluded from all totals.
+    value_unavailable: bool = Field(False, alias="valueUnavailable")
+    unavailable_reason: Optional[UnavailableReason] = Field(None, alias="unavailableReason")
 
     class Config:
         from_attributes = True
@@ -92,7 +99,8 @@ class GroupedHolding(BaseModel):
     asset: Asset
     lots: List[HoldingWithAsset]
     total_quantity: float = Field(alias="totalQuantity")
-    avg_cost: float = Field(alias="avgCost")
+    # Base currency; None when the group is value_unavailable.
+    avg_cost: Optional[float] = Field(default=None, alias="avgCost")
     current_price: Optional[float] = Field(default=None, alias="currentPrice")
     price_change: Optional[float] = Field(default=None, alias="priceChange")
     price_change_percent: Optional[float] = Field(default=None, alias="priceChangePercent")
@@ -100,6 +108,9 @@ class GroupedHolding(BaseModel):
     unrealized_pnl: Optional[float] = Field(default=None, alias="unrealizedPnL")
     unrealized_pnl_percent: Optional[float] = Field(default=None, alias="unrealizedPnLPercent")
     weight: Optional[float] = None
+    # Set when any lot is; carries the first flagged lot's reason.
+    value_unavailable: bool = Field(False, alias="valueUnavailable")
+    unavailable_reason: Optional[UnavailableReason] = Field(None, alias="unavailableReason")
 
     class Config:
         populate_by_name = True
