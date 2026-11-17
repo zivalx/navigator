@@ -128,6 +128,7 @@ interface RawPriceAlert {
   assetId: string;
   symbol: string;
   name: string;
+  currency?: string;
   rule: PriceAlert["rule"];
   threshold: number | null;
   intent: PriceAlert["intent"];
@@ -149,6 +150,7 @@ function mapPriceAlert(raw: RawPriceAlert): PriceAlert {
     assetId: raw.assetId,
     symbol: raw.symbol,
     name: raw.name,
+    currency: raw.currency || 'USD',
     rule: raw.rule,
     threshold: raw.threshold != null ? Number(raw.threshold) : null,
     intent: raw.intent ?? null,

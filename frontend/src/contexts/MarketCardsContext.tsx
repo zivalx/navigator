@@ -1,3 +1,4 @@
+import type { MarketRegion } from '@/lib/types';
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef } from 'react';
 import { MarketCard, MarketCardData, defaultMarketCards } from '@/lib/marketCardTypes';
 import { api } from '@/lib/api';
@@ -5,7 +6,7 @@ import { useAppSettings } from '@/contexts/AppSettingsContext';
 
 interface MarketCardsContextType {
   cards: MarketCardData[];
-  addCard: (symbol: string, name: string, region?: 'US' | 'EU' | 'ASIA') => void;
+  addCard: (symbol: string, name: string, region?: MarketRegion) => void;
   removeCard: (id: string) => void;
   updateCard: (id: string, updates: Partial<MarketCard>) => void;
   reorderCards: (fromIndex: number, toIndex: number) => void;
@@ -74,7 +75,7 @@ export function MarketCardsProvider({ children }: { children: ReactNode }) {
       lastUpdated: new Date(),
     }));
 
-  const addCard = useCallback((symbol: string, name: string, region?: 'US' | 'EU' | 'ASIA') => {
+  const addCard = useCallback((symbol: string, name: string, region?: MarketRegion) => {
     const newCard: MarketCard = {
       id: `card_${Date.now()}`,
       symbol: symbol.toUpperCase(),

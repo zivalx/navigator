@@ -5,13 +5,14 @@ import { Button } from '@/components/ui/button';
 import { Search, TrendingUp, TrendingDown, Settings, RotateCcw } from 'lucide-react';
 import { PercentChange } from '@/components/common/PriceDisplay';
 import { cn } from '@/lib/utils';
+import type { MarketRegion } from '@/lib/types';
 import { MarketAssetCard } from './MarketAssetCard';
 import { AddMarketCardDialog } from './AddMarketCardDialog';
 import { useMarketCards } from '@/contexts/MarketCardsContext';
 import { defaultMarketCards } from '@/lib/marketCardTypes';
 import { toast } from 'sonner';
 
-type Region = 'ALL' | 'US' | 'EU' | 'ASIA';
+type Region = 'ALL' | MarketRegion;
 
 export function MarketsOverview() {
   const { cards, isEditMode, setEditMode } = useMarketCards();
@@ -59,6 +60,9 @@ export function MarketsOverview() {
               </TabsTrigger>
               <TabsTrigger value="ASIA" className="gap-1">
                 <span>🌏</span> Asia
+              </TabsTrigger>
+              <TabsTrigger value="IL" className="gap-1">
+                <span>🇮🇱</span> Israel
               </TabsTrigger>
             </TabsList>
           </Tabs>

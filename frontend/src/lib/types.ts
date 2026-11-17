@@ -1,6 +1,7 @@
 export type AssetType = 'stock' | 'etf' | 'crypto' | 'fund' | 'other';
-export type MarketRegion = 'US' | 'EU' | 'ASIA';
-export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF';
+export type MarketRegion = 'US' | 'EU' | 'ASIA' | 'IL';
+export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF'
+  | 'ILS' | 'HKD' | 'CNY' | 'KRW' | 'TWD' | 'SGD' | 'INR' | 'SEK' | 'DKK' | 'NOK' | 'AUD' | 'CAD' | 'ZAR';
 
 export interface Asset {
   id: string;
@@ -197,6 +198,8 @@ export interface PriceAlert {
   assetId: string;
   symbol: string;
   name: string;
+  /** Currency code of the alert's asset (prices are in this currency). */
+  currency: string;
   rule: PriceAlertRule;
   threshold: number | null;
   intent?: PriceAlertIntent | null;

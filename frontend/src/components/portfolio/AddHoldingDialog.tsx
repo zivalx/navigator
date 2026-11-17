@@ -285,7 +285,9 @@ export function AddHoldingDialog() {
                     <SelectItem value="USD">USD</SelectItem>
                     <SelectItem value="EUR">EUR</SelectItem>
                     <SelectItem value="GBP">GBP</SelectItem>
+                    <SelectItem value="JPY">JPY</SelectItem>
                     <SelectItem value="CHF">CHF</SelectItem>
+                    <SelectItem value="ILS">ILS</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

@@ -1,9 +1,10 @@
+import type { MarketRegion } from '@/lib/types';
 export interface MarketCard {
   id: string;
   symbol: string;
   name: string;
   order: number;
-  region?: 'US' | 'EU' | 'ASIA';
+  region?: MarketRegion;
 }
 
 export interface MarketCardData extends MarketCard {

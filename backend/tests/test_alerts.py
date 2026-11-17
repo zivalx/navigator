@@ -440,3 +440,15 @@ def test_alert_message_uses_shekel_symbol(db_session):
                        triggered_price=26.0)
     msg = format_alert_message(alert)
     assert "₪" in msg and "$" not in msg
+
+
+def test_alert_response_includes_asset_currency(client, db_session):
+    asset = make_asset(db_session, symbol="TEVA.TA", currency=Currency.ILS)
+    response = client.post(
+        "/api/alerts/",
+        json={"assetId": asset.id, "rule": "price_below", "threshold": 50.0},
+    )
+    assert response.status_code == 201
+    assert response.json()["currency"] == "ILS"
+    listed = client.get("/api/alerts/").json()
+    assert listed[0]["currency"] == "ILS"

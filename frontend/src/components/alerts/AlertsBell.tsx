@@ -7,7 +7,8 @@ import { Bell, Check, CheckCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { api } from '@/lib/api';
-import { formatAlertHeadline, formatMoney } from './alertUtils';
+import { formatAlertHeadline } from './alertUtils';
+import { formatMoney } from '@/lib/utils';
 
 // Alert ids we've already surfaced a toast for. Module-level so it survives
 // route changes (each page mounts its own AppLayout/AlertsBell) — alerts that
@@ -30,7 +31,7 @@ export function AlertsBell() {
       if (toastedAlertIds.has(alert.id)) continue;
       toastedAlertIds.add(alert.id);
       toast(`Alert triggered: ${formatAlertHeadline(alert)}`, {
-        description: alert.triggeredPrice != null ? `Hit ${formatMoney(alert.triggeredPrice)}` : undefined,
+        description: alert.triggeredPrice != null ? `Hit ${formatMoney(alert.triggeredPrice, alert.currency || 'USD')}` : undefined,
       });
     }
   }, [alerts]);
@@ -91,7 +92,7 @@ export function AlertsBell() {
                 <div className="min-w-0">
                   <div className="text-sm font-medium">{formatAlertHeadline(alert)}</div>
                   <div className="text-xs text-muted-foreground mt-0.5">
-                    {alert.triggeredPrice != null && `Hit ${formatMoney(alert.triggeredPrice)} · `}
+                    {alert.triggeredPrice != null && `Hit ${formatMoney(alert.triggeredPrice, alert.currency || 'USD')} · `}
                     {alert.triggeredAt && formatDistanceToNow(alert.triggeredAt, { addSuffix: true })}
                   </div>
                   {alert.note && <div className="text-xs text-muted-foreground italic mt-0.5">{alert.note}</div>}

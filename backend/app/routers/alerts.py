@@ -86,6 +86,7 @@ class PriceAlertOut(BaseModel):
     asset_id: str = Field(alias="assetId")
     symbol: str
     name: str
+    currency: str = "USD"
     rule: AlertRule
     threshold: Optional[float] = None
     intent: Optional[AlertIntent] = None
@@ -112,6 +113,7 @@ def _serialize(alert: PriceAlert) -> PriceAlertOut:
         asset_id=alert.asset_id,
         symbol=alert.asset.symbol if alert.asset else "",
         name=alert.asset.name if alert.asset else "",
+        currency=alert.asset.currency.value if alert.asset else "USD",
         rule=alert.rule,
         threshold=alert.threshold,
         intent=alert.intent,

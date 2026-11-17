@@ -1,3 +1,4 @@
+import type { MarketRegion } from '@/lib/types';
 import { useState } from 'react';
 import { Plus, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -42,7 +43,7 @@ export function AddMarketCardDialog() {
   const [open, setOpen] = useState(false);
   const [symbol, setSymbol] = useState('');
   const [name, setName] = useState('');
-  const [region, setRegion] = useState<'US' | 'EU' | 'ASIA'>('US');
+  const [region, setRegion] = useState<MarketRegion>('US');
   const [searchQuery, setSearchQuery] = useState('');
 
   const filteredSymbols = popularSymbols.filter(
@@ -163,7 +164,7 @@ export function AddMarketCardDialog() {
 
             <div className="space-y-2">
               <Label>Region</Label>
-              <Select value={region} onValueChange={(v) => setRegion(v as 'US' | 'EU' | 'ASIA')}>
+              <Select value={region} onValueChange={(v) => setRegion(v as MarketRegion)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -171,6 +172,7 @@ export function AddMarketCardDialog() {
                   <SelectItem value="US">🇺🇸 US</SelectItem>
                   <SelectItem value="EU">🇪🇺 Europe</SelectItem>
                   <SelectItem value="ASIA">🌏 Asia</SelectItem>
+                  <SelectItem value="IL">🇮🇱 Israel</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -26,3 +26,15 @@ export function formatMoney(
   }).format(v);
   return signed && v >= 0 ? `+${formatted}` : formatted;
 }
+
+/** Currency symbol for a code (e.g. "USD" -> "$", "ILS" -> "₪"); falls back to the code. */
+export function currencySymbol(code: string): string {
+  try {
+    const part = new Intl.NumberFormat("en-US", { style: "currency", currency: code })
+      .formatToParts(0)
+      .find((p) => p.type === "currency");
+    return part?.value ?? code;
+  } catch {
+    return code;
+  }
+}
