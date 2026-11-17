@@ -415,3 +415,28 @@ async def test_evaluate_noop_when_no_active_alerts(eval_db, monkeypatch):
     patch_quotes(monkeypatch, {})
     # Should not raise even with nothing to evaluate.
     await scheduler_module.evaluate_price_alerts()
+
+
+def test_format_money():
+    from app.services.money_format import format_money
+
+    assert format_money(65.12, "ILS") == "₪65.12"
+    assert format_money(1234.5, "USD") == "$1,234.50"
+    assert format_money(10, "EUR") == "€10.00"
+    assert format_money(10, "GBP") == "£10.00"
+    assert format_money(10, "JPY") == "¥10.00"
+    assert format_money(1234.5, "CHF") == "1,234.50 CHF"
+    assert format_money(None, "USD") == "—"
+
+
+def test_alert_message_uses_shekel_symbol(db_session):
+    from app.models.alert import AlertRule
+    from app.models.asset import Currency, MarketRegion
+    from app.services.notifications import format_alert_message
+
+    asset = make_asset(db_session, symbol="TEVA.TA", currency=Currency.ILS,
+                       exchange="TLV", market_region=MarketRegion.IL)
+    alert = make_alert(db_session, asset, rule=AlertRule.PRICE_BELOW, threshold=26.5,
+                       triggered_price=26.0)
+    msg = format_alert_message(alert)
+    assert "₪" in msg and "$" not in msg

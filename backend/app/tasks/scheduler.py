@@ -10,6 +10,7 @@ from ..database import SessionLocal
 from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
+from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_marker
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
@@ -264,6 +265,19 @@ async def evaluate_price_alerts() -> None:
             await notify_triggered_alerts(db)
             return
 
+        # Alerts created before the minor-unit cutover hold thresholds in the
+        # old unit (agorot/pence); until the audit converts them, a quote with
+        # a unit factor or a stale cache fallback (no unit info) can't be
+        # compared safely, so those alerts are paused.
+        cutover = get_marker(db, CUTOVER_MARKER)
+        pause_active = (
+            cutover is not None
+            and get_marker(db, ALERTS_CONVERTED_MARKER) is None
+        )
+        if pause_active and cutover.tzinfo is None:
+            cutover = cutover.replace(tzinfo=timezone.utc)
+        paused_symbols: set[str] = set()
+
         triggered_count = 0
         dirty = False
         for alert in alerts:
@@ -273,6 +287,16 @@ async def evaluate_price_alerts() -> None:
             quote = quotes.get(alert.asset.symbol)
             if not quote or quote.get("error") or quote.get("price") is None:
                 continue
+
+            if pause_active and (
+                quote.get("unitFactor", 1.0) != 1.0 or quote.get("stale")
+            ):
+                created = alert.created_at
+                if created is not None and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created is not None and created < cutover:
+                    paused_symbols.add(alert.asset.symbol)
+                    continue
 
             price = quote["price"]
 
@@ -296,6 +320,11 @@ async def evaluate_price_alerts() -> None:
                 triggered_count += 1
                 dirty = True
 
+        if paused_symbols:
+            logger.warning(
+                "paused pre-cutover alerts until audit --apply: %s",
+                sorted(paused_symbols),
+            )
         if dirty:
             db.commit()
         if triggered_count:
