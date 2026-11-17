@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from ..providers import PolygonProvider, FinnhubProvider, CoinGeckoProvider, YahooFinanceProvider, AlphaVantageProvider
 from ..cache import cache
 from ..config import settings
-from ..models.asset import Asset
+from ..models.asset import Asset, Currency
 from ..models.price import PriceSnapshot
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,10 @@ class MarketDataService:
         elif not asset_type:
             asset_type = "stock"
 
+        # Polygon and Finnhub hardcode currency "USD", so they must never price
+        # an asset that is known to trade in another currency.
+        usd_fallbacks_ok = asset is None or asset.currency == Currency.USD
+
         # Try crypto provider for crypto assets
         if asset_type == "crypto":
             try:
@@ -75,7 +79,7 @@ class MarketDataService:
                 errors.append(f"Yahoo: {str(e)}")
 
         # Try Polygon if configured (higher rate limits / more data)
-        if not quote and asset_type in ["stock", "etf"] and self.polygon:
+        if not quote and asset_type in ["stock", "etf"] and self.polygon and usd_fallbacks_ok:
             try:
                 quote = await self.polygon.get_quote(symbol)
                 provider_used = "polygon"
@@ -84,7 +88,7 @@ class MarketDataService:
                 errors.append(f"Polygon: {str(e)}")
 
         # Try Finnhub as last resort
-        if not quote and self.finnhub:
+        if not quote and self.finnhub and usd_fallbacks_ok:
             try:
                 quote = await self.finnhub.get_quote(symbol)
                 provider_used = "finnhub"
@@ -170,8 +174,9 @@ class MarketDataService:
             )
             self.db.add(snapshot)
             self.db.commit()
-        except Exception:
+        except Exception as exc:
             # Don't fail if we can't store - just skip
+            logger.warning("could not store price snapshot for %s: %s", symbol, exc)
             self.db.rollback()
 
     async def _fetch_and_cache_movers(self) -> None:
