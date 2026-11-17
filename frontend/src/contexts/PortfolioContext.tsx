@@ -26,8 +26,9 @@ interface PortfolioContextType {
   portfolioSummary: PortfolioSummary;
   topHoldings: GroupedHolding[];
   topMovers: { gainers: MarketMover[]; losers: MarketMover[] };
-  /** Holdings left out of every total (unique by symbol), with the reason. */
-  excludedHoldings: { symbol: string; reason: string }[];
+  /** Symbols with lots left out of every total (unique by symbol; first
+   *  flagged lot's reason), with how many of the symbol's lots are excluded. */
+  excludedHoldings: ExcludedHolding[];
 
   // Settings
   baseCurrency: Currency;
@@ -53,6 +54,13 @@ interface PortfolioContextType {
 
   importHoldings: (holdings: Omit<HoldingLot, 'id' | 'createdAt'>[]) => void;
   searchAssets: (query: string) => Asset[];
+}
+
+export interface ExcludedHolding {
+  symbol: string;
+  reason: UnavailableReason;
+  excludedLots: number;
+  totalLots: number;
 }
 
 const PortfolioContext = createContext<PortfolioContextType | undefined>(undefined);
@@ -247,11 +255,16 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       return reason ? { ...h, valueUnavailable: true, unavailableReason: reason } : h;
     });
 
-    const bySymbol = new Map<string, string>();
+    const bySymbol = new Map<string, ExcludedHolding>();
     for (const h of flagged) {
-      if (h.valueUnavailable && !bySymbol.has(h.asset.symbol)) {
-        bySymbol.set(h.asset.symbol, h.unavailableReason ?? 'price_unavailable');
-      }
+      if (!h.valueUnavailable || bySymbol.has(h.asset.symbol)) continue;
+      const lotsOfSymbol = flagged.filter(l => l.asset.symbol === h.asset.symbol);
+      bySymbol.set(h.asset.symbol, {
+        symbol: h.asset.symbol,
+        reason: h.unavailableReason ?? 'price_unavailable',
+        excludedLots: lotsOfSymbol.filter(l => l.valueUnavailable).length,
+        totalLots: lotsOfSymbol.length,
+      });
     }
 
     const nav = flagged.reduce((sum, h) => sum + (h.valueUnavailable ? 0 : h.marketValue || 0), 0);
@@ -265,7 +278,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
     return {
       holdingsWithWeights: withWeights,
       valuedHoldings: withWeights.filter(h => !h.valueUnavailable),
-      excludedHoldings: Array.from(bySymbol, ([symbol, reason]) => ({ symbol, reason })),
+      excludedHoldings: Array.from(bySymbol.values()),
       totalNav: nav,
     };
   }, [holdingsWithAssets, costBaseOf]);
@@ -331,7 +344,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           lots: sortedLots,
           totalQuantity,
           avgCost: null,
-          priceChangePercent: lots[0].priceChangePercent,
+          priceChangePercent: lots.find(l => !l.valueUnavailable)?.priceChangePercent,
           valueUnavailable: true,
           unavailableReason: reason ?? 'price_unavailable',
         };
