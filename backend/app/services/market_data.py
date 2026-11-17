@@ -40,7 +40,7 @@ class MarketDataService:
         2. Try CoinGecko (free, no key needed)
         3. Return last known price from DB
         """
-        cache_key = f"quote:{symbol.upper()}"
+        cache_key = f"quote:v2:{symbol.upper()}"
 
         # Try cache first
         cached = await cache.get(cache_key)

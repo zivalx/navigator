@@ -12,6 +12,7 @@ from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
+from ..services.currency_units import normalize_quote_currency
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -182,10 +183,8 @@ async def backfill_historical_prices() -> None:
                         .get("quote", [{}])[0]
                         .get("close", [])
                     )
-                    currency = (
-                        result[0]
-                        .get("meta", {})
-                        .get("currency", "USD")
+                    currency, factor = normalize_quote_currency(
+                        result[0].get("meta", {}).get("currency")
                     )
 
                     snapshots = []
@@ -196,7 +195,7 @@ async def backfill_historical_prices() -> None:
                             PriceSnapshot(
                                 id=str(uuid.uuid4()),
                                 asset_id=asset.id,
-                                price=close,
+                                price=close * factor,
                                 currency=currency,
                                 timestamp=datetime.fromtimestamp(
                                     ts, tz=timezone.utc
