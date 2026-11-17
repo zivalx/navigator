@@ -41,6 +41,15 @@ def _currency_code(value) -> str:
     return getattr(value, "value", value)
 
 
+def _is_lot_currency_check(lot) -> bool:
+    """An ILS asset with a non-ILS lot: the known result of the old USD
+    default, so the recorded cost is really shekels (spec 6.4)."""
+    return (
+        _currency_code(lot.asset.currency) == Currency.ILS.value
+        and _currency_code(lot.cost_currency) != Currency.ILS.value
+    )
+
+
 class PortfolioService:
     """Service for portfolio calculations and analytics."""
 
@@ -96,10 +105,7 @@ class PortfolioService:
             )
             return {"valueUnavailable": True, "unavailableReason": reason, **extra}
 
-        if (
-            _currency_code(holding.asset.currency) == Currency.ILS.value
-            and _currency_code(holding.cost_currency) != Currency.ILS.value
-        ):
+        if _is_lot_currency_check(holding):
             return unavailable("lot_currency_check")
 
         # Cost basis in base currency, exposed as avgCostBase so callers can
@@ -534,26 +540,42 @@ class PortfolioService:
             )
             return None
 
+        bought_today = [
+            lot for lot in holdings
+            if lot.purchase_date is not None
+            and _ensure_aware(lot.purchase_date).date() == day
+        ]
+        # A lot_currency_check lot's recorded cost is not in its labelled
+        # currency, so it can't enter net_flow. Its NAV (price-based) is fine,
+        # so only its purchase day is skipped.
+        unchecked = sorted({
+            lot.asset.symbol for lot in bought_today if _is_lot_currency_check(lot)
+        })
+        if unchecked:
+            logger.warning(
+                "skipping portfolio snapshot for %s: lot currency check for %s",
+                day, ", ".join(unchecked),
+            )
+            return None
+
         nav = await usd._get_nav_at_date(end_of_day, holdings=holdings)
         if nav is None:
             return None
 
         net_flow = 0.0
-        for lot in holdings:
-            pd = lot.purchase_date
-            if pd is not None and _ensure_aware(pd).date() == day:
-                cost_code = _currency_code(lot.cost_currency)
-                try:
-                    cost_usd = await usd.fx_service.convert(
-                        lot.avg_cost, Currency(cost_code), Currency.USD
-                    )
-                except Exception:
-                    logger.warning(
-                        "skipping portfolio snapshot for %s: no FX rate for %s",
-                        day, cost_code,
-                    )
-                    return None
-                net_flow += cost_usd * lot.quantity
+        for lot in bought_today:
+            cost_code = _currency_code(lot.cost_currency)
+            try:
+                cost_usd = await usd.fx_service.convert(
+                    lot.avg_cost, Currency(cost_code), Currency.USD
+                )
+            except Exception:
+                logger.warning(
+                    "skipping portfolio snapshot for %s: no FX rate for %s",
+                    day, cost_code,
+                )
+                return None
+            net_flow += cost_usd * lot.quantity
 
         prev = (
             self.db.query(PortfolioSnapshot)
@@ -572,8 +594,22 @@ class PortfolioService:
                 # Only lots held at the previous close contribute today's move.
                 if pd is not None and _ensure_aware(pd) > prev_end:
                     continue
-                p_now = await usd._asset_usd_price_at(lot.asset_id, end_of_day)
-                p_prev = await usd._asset_usd_price_at(lot.asset_id, prev_end)
+                prices = []
+                for when in (end_of_day, prev_end):
+                    price = await usd._asset_usd_price_at(lot.asset_id, when)
+                    if price is None:
+                        snap = usd._latest_snapshot(lot.asset_id, when)
+                        if snap is not None:
+                            # A price exists but has no USD rate: dropping
+                            # the lot would store a partial daily_pnl.
+                            logger.warning(
+                                "skipping portfolio snapshot for %s: no FX rate for %s",
+                                day, _currency_code(snap.currency),
+                            )
+                            return None
+                    prices.append(price)
+                p_now, p_prev = prices
+                # No snapshot yet (history just begins): nothing to diff.
                 if p_now is None or p_prev is None:
                     continue
                 daily_pnl += lot.quantity * (p_now - p_prev)

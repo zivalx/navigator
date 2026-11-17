@@ -448,4 +448,78 @@ async def test_daily_pnl_series_empty_when_display_rate_missing(db_session, rate
 
     assert result["points"] == []
     assert result["base_currency"] == "ILS"
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert any(
+        r.levelno == logging.WARNING
+        and r.getMessage() == "daily P&L series unavailable: no FX rate USD->ILS"
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_snapshot_skipped_on_lot_currency_check_purchase_day(
+    db_session, rates, quotes, caplog
+):
+    """A USD-labelled lot on an ILS asset carries a shekel cost: it must not
+    reach the permanent USD net_flow. Its purchase day is skipped; later days
+    (price-based NAV only) are still written."""
+    buy_day = (NOW - dt.timedelta(days=3)).date()
+    next_day = buy_day + dt.timedelta(days=1)
+    rates[("ILS", "USD")] = 0.27
+
+    bad = make_ils_asset(db_session, symbol="LUMI.TA")
+    make_lot(db_session, bad, 10, 6000.0, Currency.USD,
+             purchase_date=dt.datetime.combine(buy_day, dt.time(10, 0), tzinfo=dt.timezone.utc))
+    for d in (buy_day, next_day):
+        make_snapshot(db_session, bad, 30.0, Currency.ILS,
+                      dt.datetime.combine(d, dt.time(23, 0), tzinfo=dt.timezone.utc))
+
+    service = PortfolioService(db_session, base_currency=Currency.USD)
+    with caplog.at_level(logging.WARNING, logger="app.services.portfolio"):
+        row = await service.compute_daily_snapshot(buy_day)
+
+    assert row is None
+    assert db_session.query(PortfolioSnapshot).count() == 0
+    assert any(
+        r.getMessage() == f"skipping portfolio snapshot for {buy_day}: lot currency check for LUMI.TA"
+        for r in caplog.records
+    )
+
+    later = await service.compute_daily_snapshot(next_day)
+    assert later is not None
+    assert later.nav == pytest.approx(10 * 30.0 * 0.27)
+    assert later.net_flow == 0.0
+
+
+@pytest.mark.asyncio
+async def test_daily_snapshot_skipped_when_prev_price_has_no_rate(
+    db_session, rates, quotes, caplog
+):
+    """The previous close's price must convert too, or the lot would silently
+    drop out of daily_pnl and the stored row would be partial."""
+    prev_day = (NOW - dt.timedelta(days=3)).date()
+    day = prev_day + dt.timedelta(days=1)
+
+    asset = make_asset(db_session, symbol="SAP.DE", currency=Currency.EUR)
+    make_lot(db_session, asset, 10, 50.0, Currency.USD,
+             purchase_date=dt.datetime.combine(prev_day, dt.time(10, 0), tzinfo=dt.timezone.utc)
+             - dt.timedelta(days=10))
+    # Prior close was stored in EUR (no EUR->USD rate), today's in USD.
+    make_snapshot(db_session, asset, 200.0, Currency.EUR,
+                  dt.datetime.combine(prev_day, dt.time(23, 0), tzinfo=dt.timezone.utc))
+    make_snapshot(db_session, asset, 210.0, Currency.USD,
+                  dt.datetime.combine(day, dt.time(23, 0), tzinfo=dt.timezone.utc))
+    db_session.add(PortfolioSnapshot(
+        id=str(uuid.uuid4()), date=prev_day, nav=2000.0, net_flow=0.0,
+        daily_pnl=0.0, daily_pnl_pct=0.0, base_currency="USD",
+    ))
+    db_session.commit()
+
+    with caplog.at_level(logging.WARNING, logger="app.services.portfolio"):
+        row = await PortfolioService(db_session, base_currency=Currency.USD).compute_daily_snapshot(day)
+
+    assert row is None
+    assert db_session.query(PortfolioSnapshot).filter_by(date=day).count() == 0
+    assert any(
+        r.getMessage() == f"skipping portfolio snapshot for {day}: no FX rate for EUR"
+        for r in caplog.records
+    )
