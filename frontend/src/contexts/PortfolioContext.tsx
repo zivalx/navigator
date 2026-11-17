@@ -234,10 +234,11 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
   }, [baseCurrency]);
 
   // Flag lots the browser can't value either (no base-currency cost, or no
-  // market value), then exclude every lot of an asset that has a flagged lot,
-  // so totals, weights and the per-asset rows all agree. Excluded holdings are
-  // listed (by symbol) for the dashboard banner instead of silently vanishing.
-  const { holdingsWithWeights, valuedHoldings, excludedAssetReasons, excludedHoldings, totalNav } = useMemo(() => {
+  // market value). Flagged lots are excluded from every total and weight —
+  // per lot, like /portfolio/summary; valid lots of the same asset still
+  // count. Excluded holdings are listed (by symbol) for the dashboard banner
+  // instead of silently vanishing.
+  const { holdingsWithWeights, valuedHoldings, excludedHoldings, totalNav } = useMemo(() => {
     const flagged: HoldingWithAsset[] = holdingsWithAssets.map(h => {
       if (h.valueUnavailable) return h;
       let reason: UnavailableReason | undefined;
@@ -246,29 +247,24 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       return reason ? { ...h, valueUnavailable: true, unavailableReason: reason } : h;
     });
 
-    const assetReasons = new Map<string, UnavailableReason>();
     const bySymbol = new Map<string, string>();
     for (const h of flagged) {
-      if (!h.valueUnavailable) continue;
-      const reason = h.unavailableReason ?? 'price_unavailable';
-      if (!assetReasons.has(h.assetId)) assetReasons.set(h.assetId, reason);
-      if (!bySymbol.has(h.asset.symbol)) bySymbol.set(h.asset.symbol, reason);
+      if (h.valueUnavailable && !bySymbol.has(h.asset.symbol)) {
+        bySymbol.set(h.asset.symbol, h.unavailableReason ?? 'price_unavailable');
+      }
     }
 
-    const valued = flagged.filter(h => !assetReasons.has(h.assetId));
-    const nav = valued.reduce((sum, h) => sum + (h.marketValue || 0), 0);
-    const valuedIds = new Set(valued.map(h => h.id));
+    const nav = flagged.reduce((sum, h) => sum + (h.valueUnavailable ? 0 : h.marketValue || 0), 0);
     const withWeights = flagged.map(h => ({
       ...h,
-      weight: valuedIds.has(h.id)
-        ? (nav > 0 && h.marketValue ? (h.marketValue / nav) * 100 : 0)
-        : undefined,
+      weight: h.valueUnavailable
+        ? undefined
+        : (nav > 0 && h.marketValue ? (h.marketValue / nav) * 100 : 0),
     }));
 
     return {
       holdingsWithWeights: withWeights,
-      valuedHoldings: withWeights.filter(h => valuedIds.has(h.id)),
-      excludedAssetReasons: assetReasons,
+      valuedHoldings: withWeights.filter(h => !h.valueUnavailable),
       excludedHoldings: Array.from(bySymbol, ([symbol, reason]) => ({ symbol, reason })),
       totalNav: nav,
     };
@@ -312,7 +308,9 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
 
   // Grouped holdings — one entry per asset, aggregating all its lots. An asset
   // with any flagged lot is flagged as a whole (first flagged lot's reason)
-  // and carries no base-currency values, mirroring /portfolio/holdings/grouped.
+  // and carries no base-currency values, mirroring /portfolio/holdings/grouped:
+  // a position figure that silently omits a lot would be wrong money. (Its
+  // valid lots still count in the portfolio totals above.)
   const groupedHoldings: GroupedHolding[] = useMemo(() => {
     const groups = new Map<string, HoldingWithAsset[]>();
     holdingsWithWeights.forEach(h => {
@@ -325,8 +323,8 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
       const totalQuantity = lots.reduce((sum, l) => sum + l.quantity, 0);
       const sortedLots = lots.sort((a, b) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime());
 
-      const reason = excludedAssetReasons.get(assetId);
-      if (reason) {
+      const reason = lots.find(l => l.valueUnavailable)?.unavailableReason;
+      if (lots.some(l => l.valueUnavailable)) {
         return {
           assetId,
           asset,
@@ -335,7 +333,7 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
           avgCost: null,
           priceChangePercent: lots[0].priceChangePercent,
           valueUnavailable: true,
-          unavailableReason: reason,
+          unavailableReason: reason ?? 'price_unavailable',
         };
       }
 
@@ -362,11 +360,11 @@ export function PortfolioProvider({ children }: { children: ReactNode }) {
         weight,
       };
     });
-  }, [holdingsWithWeights, excludedAssetReasons, costBaseOf]);
+  }, [holdingsWithWeights, costBaseOf]);
 
   // Top holdings by weight — grouped per asset, so a symbol held across
-  // multiple lots (e.g. AAPL in two accounts) shows as one position. Excluded
-  // assets have no weight and are left out.
+  // multiple lots (e.g. AAPL in two accounts) shows as one position. A flagged
+  // group has no position value or weight (see above), so it is left out.
   const topHoldings = useMemo(() =>
     groupedHoldings
       .filter(g => !g.valueUnavailable)
