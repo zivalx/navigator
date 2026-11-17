@@ -14,6 +14,7 @@ from ..schemas.portfolio import PortfolioSummary
 from ..schemas.asset import Currency
 from .market_data import MarketDataService
 from .fx import FxService
+from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class PortfolioService:
         def unavailable(reason: str, detail=None, **extra) -> dict:
             logger.warning(
                 "holding %s has no %s value: %s%s", symbol, self.base_currency.value,
-                reason, f" ({detail})" if detail else "",
+                reason, f" ({redact_secrets(detail)})" if detail else "",
             )
             return {"valueUnavailable": True, "unavailableReason": reason, **extra}
 

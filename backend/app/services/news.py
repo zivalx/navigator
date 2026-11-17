@@ -8,6 +8,7 @@ import uuid
 from ..models.news import NewsItem
 from ..models.asset import Asset
 from ..config import settings
+from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class NewsService:
             return count
 
         except Exception as e:
-            logger.error("Error syncing news: %s", e)
+            logger.error("Error syncing news: %s", redact_secrets(e))
             self.db.rollback()
             return 0
 
