@@ -5,7 +5,7 @@ import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { cn } from '@/lib/utils';
 
 export function AlertsCard() {
-  const { alerts } = usePortfolio();
+  const { alerts, excludedHoldings } = usePortfolio();
 
   const getAlertIcon = (type: string) => {
     switch (type) {
@@ -38,12 +38,22 @@ export function AlertsCard() {
           Alerts
           <InfoTooltip text="Data quality issues — missing prices, unmapped symbols, or API errors affecting your portfolio." />
         </h3>
-        <EmptyState
-          icon={<Info className="h-6 w-6" />}
-          title="All Good!"
-          description="No issues with your portfolio data."
-          className="py-4"
-        />
+        {excludedHoldings.length > 0 ? (
+          // The exclusion banner above names them; don't claim "no issues".
+          <EmptyState
+            icon={<AlertTriangle className="h-6 w-6" />}
+            title="Some holdings are excluded"
+            description="Holdings that can't be valued are left out of your totals - see the notice above."
+            className="py-4"
+          />
+        ) : (
+          <EmptyState
+            icon={<Info className="h-6 w-6" />}
+            title="All Good!"
+            description="No issues with your portfolio data."
+            className="py-4"
+          />
+        )}
       </div>
     );
   }

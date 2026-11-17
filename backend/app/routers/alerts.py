@@ -16,10 +16,16 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models.alert import AlertIntent, AlertRule, PriceAlert
-from ..models.asset import Asset, AssetType, Currency, MarketRegion
+from ..models.asset import Asset, AssetType, MarketRegion
 from ..services import alerts as alerts_service
 from ..services.alerts import AlertSeedError, AlertValidationError
-from ..services.market_data import MarketDataService
+from ..services.asset_identity import (
+    ListingUnavailable,
+    SymbolNotFound,
+    UnsupportedCurrency,
+    derive_listing,
+    listing_http_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +86,7 @@ class PriceAlertOut(BaseModel):
     asset_id: str = Field(alias="assetId")
     symbol: str
     name: str
+    currency: str = "USD"
     rule: AlertRule
     threshold: Optional[float] = None
     intent: Optional[AlertIntent] = None
@@ -106,6 +113,7 @@ def _serialize(alert: PriceAlert) -> PriceAlertOut:
         asset_id=alert.asset_id,
         symbol=alert.asset.symbol if alert.asset else "",
         name=alert.asset.name if alert.asset else "",
+        currency=alert.asset.currency.value if alert.asset else "USD",
         rule=alert.rule,
         threshold=alert.threshold,
         intent=alert.intent,
@@ -147,26 +155,24 @@ async def _resolve_asset(asset_id: Optional[str], symbol: Optional[str], db: Ses
     if asset:
         return asset
 
-    # Best-effort enrichment from live market data; fall back to sane
-    # defaults if the quote can't be fetched (e.g. unknown/offline symbol).
-    currency_value = Currency.USD
     try:
-        market_service = MarketDataService(db)
-        quote = await market_service.get_quote(symbol_upper)
-        try:
-            currency_value = Currency(quote.get("currency", "USD"))
-        except ValueError:
-            currency_value = Currency.USD
-    except Exception:
-        pass
+        listing = await derive_listing(symbol_upper)
+    except (ListingUnavailable, UnsupportedCurrency, SymbolNotFound) as e:
+        raise listing_http_error(e) from e
+
+    region = listing.market_region
+    if region is None:
+        logger.warning("unknown venue %s for %s", listing.exchange, symbol_upper)
+        region = MarketRegion.US
 
     asset = Asset(
         id=str(uuid.uuid4()),
         symbol=symbol_upper,
         name=symbol_upper,
-        currency=currency_value,
+        exchange=listing.exchange,
+        currency=listing.currency,
         asset_type=AssetType.STOCK,
-        market_region=MarketRegion.US,
+        market_region=region,
     )
     db.add(asset)
     db.commit()

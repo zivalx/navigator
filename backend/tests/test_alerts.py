@@ -10,10 +10,12 @@ Covers docs/superpowers/specs/2026-07-23-price-alerts-design.md:
 """
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from app.models.alert import AlertRule, PriceAlert
 from app.models.asset import Asset, Currency
+from app.providers.yahoo import YahooFinanceProvider
 from app.services.market_data import MarketDataService
 from app.tasks import scheduler as scheduler_module
 from tests.factories import make_alert, make_asset, patch_quotes, reload_alert
@@ -170,10 +172,11 @@ def test_create_alert_by_existing_symbol(client, db_session):
 
 
 def test_create_alert_by_new_symbol_creates_asset(client, db_session, monkeypatch):
-    async def fake_get_quote(self, symbol, asset_type=None):
-        return {"symbol": symbol.upper(), "price": 42.0, "currency": "USD"}
+    async def fake_meta(self, symbol):
+        return {"currency": "USD", "unitFactor": 1.0, "exchangeName": "NMS",
+                "fullExchangeName": "NasdaqGS", "instrumentType": "EQUITY"}
 
-    monkeypatch.setattr(MarketDataService, "get_quote", fake_get_quote)
+    monkeypatch.setattr(YahooFinanceProvider, "get_chart_meta", fake_meta)
 
     assert db_session.query(Asset).filter(Asset.symbol == "TSLA").first() is None
 
@@ -188,22 +191,23 @@ def test_create_alert_by_new_symbol_creates_asset(client, db_session, monkeypatc
     created = db_session.query(Asset).filter(Asset.symbol == "TSLA").first()
     assert created is not None
     assert created.currency == Currency.USD
+    assert created.market_region == "US"
 
 
-def test_create_alert_by_new_symbol_when_quote_fetch_fails_still_creates_asset(
+def test_create_alert_by_new_symbol_when_yahoo_unavailable_503s_without_asset(
     client, db_session, monkeypatch
 ):
-    async def fake_get_quote(self, symbol, asset_type=None):
-        raise ValueError("no data")
+    async def boom(self, symbol):
+        raise httpx.ConnectError("down")
 
-    monkeypatch.setattr(MarketDataService, "get_quote", fake_get_quote)
+    monkeypatch.setattr(YahooFinanceProvider, "get_chart_meta", boom)
 
     response = client.post(
         "/api/alerts/",
         json={"symbol": "zzzz", "rule": "price_below", "threshold": 10.0},
     )
-    assert response.status_code == 201
-    assert response.json()["symbol"] == "ZZZZ"
+    assert response.status_code == 503
+    assert db_session.query(Asset).filter(Asset.symbol == "ZZZZ").first() is None
 
 
 def test_create_alert_empty_symbol_400s(client):
@@ -411,3 +415,40 @@ async def test_evaluate_noop_when_no_active_alerts(eval_db, monkeypatch):
     patch_quotes(monkeypatch, {})
     # Should not raise even with nothing to evaluate.
     await scheduler_module.evaluate_price_alerts()
+
+
+def test_format_money():
+    from app.services.money_format import format_money
+
+    assert format_money(65.12, "ILS") == "₪65.12"
+    assert format_money(1234.5, "USD") == "$1,234.50"
+    assert format_money(10, "EUR") == "€10.00"
+    assert format_money(10, "GBP") == "£10.00"
+    assert format_money(10, "JPY") == "¥10.00"
+    assert format_money(1234.5, "CHF") == "1,234.50 CHF"
+    assert format_money(None, "USD") == "—"
+
+
+def test_alert_message_uses_shekel_symbol(db_session):
+    from app.models.alert import AlertRule
+    from app.models.asset import Currency, MarketRegion
+    from app.services.notifications import format_alert_message
+
+    asset = make_asset(db_session, symbol="TEVA.TA", currency=Currency.ILS,
+                       exchange="TLV", market_region=MarketRegion.IL)
+    alert = make_alert(db_session, asset, rule=AlertRule.PRICE_BELOW, threshold=26.5,
+                       triggered_price=26.0)
+    msg = format_alert_message(alert)
+    assert "₪" in msg and "$" not in msg
+
+
+def test_alert_response_includes_asset_currency(client, db_session):
+    asset = make_asset(db_session, symbol="TEVA.TA", currency=Currency.ILS)
+    response = client.post(
+        "/api/alerts/",
+        json={"assetId": asset.id, "rule": "price_below", "threshold": 50.0},
+    )
+    assert response.status_code == 201
+    assert response.json()["currency"] == "ILS"
+    listed = client.get("/api/alerts/").json()
+    assert listed[0]["currency"] == "ILS"

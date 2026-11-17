@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -28,8 +30,79 @@ def get_db():
 
 def init_db():
     """Initialize database tables."""
-    Base.metadata.create_all(bind=engine)
-    _migrate_price_alerts()
+    if engine.dialect.name != "postgresql":
+        Base.metadata.create_all(bind=engine)
+        _migrate_enum_values()
+        _migrate_price_alerts()
+        ensure_cutover_marker()
+        return
+
+    # Two gunicorn workers boot concurrently: serialise the whole Postgres
+    # init (create_all, enum + column migrations, marker) behind one lock.
+    with _pg_init_lock(engine):
+        Base.metadata.create_all(bind=engine)
+        _apply_enum_values(engine)
+        _migrate_price_alerts()
+        ensure_cutover_marker()
+
+
+_ENUM_LOCK_KEY = 7400417
+_NEW_CURRENCY_VALUES = (
+    "ILS", "HKD", "CNY", "KRW", "TWD", "SGD", "INR",
+    "SEK", "DKK", "NOK", "AUD", "CAD", "ZAR",
+)
+
+
+def _migrate_enum_values(target_engine=None):
+    """Add new currency / market-region labels to pre-existing Postgres enums.
+
+    create_all() never alters an existing enum type. Postgres-only. Runs on an
+    AUTOCOMMIT connection (ADD VALUE must be visible to later statements) under
+    an advisory lock so two workers booting together serialise.
+    """
+    target_engine = target_engine or engine
+    if target_engine.dialect.name != "postgresql":
+        return
+    with _pg_init_lock(target_engine):
+        _apply_enum_values(target_engine)
+
+
+@contextmanager
+def _pg_init_lock(target_engine):
+    """Session-level advisory lock held on a dedicated AUTOCOMMIT connection."""
+    with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(f"SELECT pg_advisory_lock({_ENUM_LOCK_KEY})")
+        try:
+            yield
+        finally:
+            conn.exec_driver_sql(f"SELECT pg_advisory_unlock({_ENUM_LOCK_KEY})")
+
+
+def _apply_enum_values(target_engine):
+    """ADD VALUE statements (caller holds the lock). AUTOCOMMIT so each value
+    is visible to later statements."""
+    statements = [
+        f"ALTER TYPE currency ADD VALUE IF NOT EXISTS '{code}'"
+        for code in _NEW_CURRENCY_VALUES
+    ]
+    statements.append("ALTER TYPE marketregion ADD VALUE IF NOT EXISTS 'IL'")
+    with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for statement in statements:
+            conn.exec_driver_sql(statement)
+
+
+def ensure_cutover_marker():
+    """Record when minor-unit normalisation went live (idempotent, race-safe)."""
+    from sqlalchemy.exc import IntegrityError
+    from .models.maintenance import CUTOVER_MARKER, set_marker
+
+    db = SessionLocal()
+    try:
+        set_marker(db, CUTOVER_MARKER)
+    except IntegrityError:
+        db.rollback()  # the other worker inserted it first
+    finally:
+        db.close()
 
 
 def _migrate_price_alerts():

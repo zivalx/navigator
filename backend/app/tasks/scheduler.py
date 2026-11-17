@@ -10,8 +10,10 @@ from ..database import SessionLocal
 from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
+from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_marker
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
+from ..services.currency_units import normalize_quote_currency
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -182,10 +184,8 @@ async def backfill_historical_prices() -> None:
                         .get("quote", [{}])[0]
                         .get("close", [])
                     )
-                    currency = (
-                        result[0]
-                        .get("meta", {})
-                        .get("currency", "USD")
+                    currency, factor = normalize_quote_currency(
+                        result[0].get("meta", {}).get("currency")
                     )
 
                     snapshots = []
@@ -196,7 +196,7 @@ async def backfill_historical_prices() -> None:
                             PriceSnapshot(
                                 id=str(uuid.uuid4()),
                                 asset_id=asset.id,
-                                price=close,
+                                price=round(close * factor, 6) if factor != 1.0 else close,
                                 currency=currency,
                                 timestamp=datetime.fromtimestamp(
                                     ts, tz=timezone.utc
@@ -243,6 +243,21 @@ async def evaluate_price_alerts() -> None:
     """
     db = SessionLocal()
     try:
+        # Alerts created before the minor-unit cutover hold thresholds in the
+        # old unit (agorot/pence); until the audit converts them, a quote with
+        # a unit factor or a stale cache fallback (no unit info) can't be
+        # compared safely, so those alerts are paused. The markers are read
+        # BEFORE the alerts are loaded: if the audit commits its conversion
+        # while this run awaits quotes, the rows loaded here are still in the
+        # old unit, so the pause must hold for the whole run.
+        cutover = get_marker(db, CUTOVER_MARKER)
+        pause_active = (
+            cutover is not None
+            and get_marker(db, ALERTS_CONVERTED_MARKER) is None
+        )
+        if pause_active and cutover.tzinfo is None:
+            cutover = cutover.replace(tzinfo=timezone.utc)
+
         alerts = (
             db.query(PriceAlert)
             .filter(PriceAlert.is_active.is_(True))
@@ -265,6 +280,8 @@ async def evaluate_price_alerts() -> None:
             await notify_triggered_alerts(db)
             return
 
+        paused_symbols: set[str] = set()
+
         triggered_count = 0
         dirty = False
         for alert in alerts:
@@ -274,6 +291,17 @@ async def evaluate_price_alerts() -> None:
             quote = quotes.get(alert.asset.symbol)
             if not quote or quote.get("error") or quote.get("price") is None:
                 continue
+
+            if pause_active and (
+                quote.get("unitFactor", 1.0) != 1.0 or quote.get("stale")
+            ):
+                created = alert.created_at
+                if created is not None and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                # NULL created_at counts as pre-cutover (same as the audit).
+                if created is None or created < cutover:
+                    paused_symbols.add(alert.asset.symbol)
+                    continue
 
             price = quote["price"]
 
@@ -297,6 +325,11 @@ async def evaluate_price_alerts() -> None:
                 triggered_count += 1
                 dirty = True
 
+        if paused_symbols:
+            logger.warning(
+                "paused pre-cutover alerts until audit --apply: %s",
+                sorted(paused_symbols),
+            )
         if dirty:
             db.commit()
         if triggered_count:

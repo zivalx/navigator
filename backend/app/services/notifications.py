@@ -12,6 +12,7 @@ import logging
 from ..config import settings
 from ..models.alert import AlertIntent, AlertRule, PriceAlert
 from ..providers.telegram import TelegramProvider
+from .money_format import format_money
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,19 @@ def format_alert_message(alert: PriceAlert) -> str:
 
     Examples:
         🔴 SELL — trailing stop hit: AAPL at $301.10 (high $327.50, trail 8% → stop $301.30)
-        🟢 BUY — target hit: NVDA ≤ $150.00 (now $149.20)
+        🟢 BUY — target hit: TEVA.TA ≤ ₪150.00 (now ₪149.20)
+
+    Prices use the asset's currency symbol (USD when the asset is missing).
 
     Intent is read from the alert as stored — the write path (services/alerts)
     is the single place that defaults trailing stops to SELL.
     """
     symbol = alert.asset.symbol if alert.asset else "?"
     price = alert.triggered_price
+    currency = alert.asset.currency.value if alert.asset else "USD"
+
+    def money(value):
+        return format_money(value, currency)
 
     if alert.intent == AlertIntent.BUY:
         prefix = "🟢 BUY"
@@ -42,17 +49,17 @@ def format_alert_message(alert: PriceAlert) -> str:
         if alert.trail_percent is not None:
             trail = f"trail {alert.trail_percent:g}%"
         else:
-            trail = f"trail ${alert.trail_amount:,.2f}"
+            trail = f"trail {money(alert.trail_amount)}"
         stop = alert.stop_price
         body = (
-            f"trailing stop hit: {symbol} at ${price:,.2f} "
-            f"(high ${alert.high_water_mark:,.2f}, {trail}"
-            + (f" → stop ${stop:,.2f}" if stop is not None else "")
+            f"trailing stop hit: {symbol} at {money(price)} "
+            f"(high {money(alert.high_water_mark)}, {trail}"
+            + (f" → stop {money(stop)}" if stop is not None else "")
             + ")"
         )
     else:
         op = "≤" if alert.rule == AlertRule.PRICE_BELOW else "≥"
-        body = f"target hit: {symbol} {op} ${alert.threshold:,.2f} (now ${price:,.2f})"
+        body = f"target hit: {symbol} {op} {money(alert.threshold)} (now {money(price)})"
 
     message = f"{prefix} — {body}"
     if alert.note:

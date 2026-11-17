@@ -26,3 +26,26 @@ export function formatMoney(
   }).format(v);
   return signed && v >= 0 ? `+${formatted}` : formatted;
 }
+
+/** Currency symbol for a code (e.g. "USD" -> "$", "ILS" -> "₪"); falls back to the code. */
+export function currencySymbol(code: string): string {
+  try {
+    const part = new Intl.NumberFormat("en-US", { style: "currency", currency: code })
+      .formatToParts(0)
+      .find((p) => p.type === "currency");
+    return part?.value ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** Short user-facing label for why a holding has no base-currency value. */
+export const UNAVAILABLE_REASON_LABELS: Record<string, string> = {
+  fx_unavailable: "no exchange rate",
+  lot_currency_check: "check lot currency",
+  price_unavailable: "no price",
+};
+
+export function unavailableReasonLabel(reason?: string | null): string {
+  return (reason && UNAVAILABLE_REASON_LABELS[reason]) || "value unavailable";
+}

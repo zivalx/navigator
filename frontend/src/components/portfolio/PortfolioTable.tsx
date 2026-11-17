@@ -23,6 +23,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Search, MoreHorizontal, Pencil, Trash2, ChevronDown, ChevronRight, Calendar, Building2, Bell } from 'lucide-react';
 import {
   DropdownMenu,
@@ -31,9 +33,23 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
-import { cn, formatMoney } from '@/lib/utils';
-import { AssetType, MarketRegion, HoldingWithAsset, GroupedHolding } from '@/lib/types';
+import { cn, formatMoney, unavailableReasonLabel } from '@/lib/utils';
+import { CURRENCIES, Currency, HoldingWithAsset, GroupedHolding } from '@/lib/types';
 import { format } from 'date-fns';
+
+/** "—" for a value that has no base-currency amount, with the reason on hover. */
+function UnavailableValue({ reason }: { reason?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="text-muted-foreground text-sm cursor-help">—</span>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="text-xs">
+        Excluded from totals: {unavailableReasonLabel(reason)}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 export function PortfolioTable() {
   const { groupedHoldings, removeHolding, updateHolding, baseCurrency } = usePortfolio();
@@ -49,6 +65,7 @@ export function PortfolioTable() {
   const [lotToEdit, setLotToEdit] = useState<HoldingWithAsset | null>(null);
   const [editQuantity, setEditQuantity] = useState('');
   const [editAvgCost, setEditAvgCost] = useState('');
+  const [editCostCurrency, setEditCostCurrency] = useState<Currency>('USD');
   const [editAccountName, setEditAccountName] = useState('');
   const [editPurchaseDate, setEditPurchaseDate] = useState('');
 
@@ -93,6 +110,7 @@ export function PortfolioTable() {
     setLotToEdit(lot);
     setEditQuantity(lot.quantity.toString());
     setEditAvgCost(lot.avgCost.toString());
+    setEditCostCurrency(lot.costCurrency);
     setEditAccountName(lot.accountName);
     setEditPurchaseDate(format(new Date(lot.purchaseDate), 'yyyy-MM-dd'));
     setEditDialogOpen(true);
@@ -107,6 +125,7 @@ export function PortfolioTable() {
     updateHolding(lotToEdit.id, { 
       quantity, 
       avgCost,
+      costCurrency: editCostCurrency,
       accountName: editAccountName,
       purchaseDate: new Date(editPurchaseDate),
     });
@@ -301,25 +320,37 @@ export function PortfolioTable() {
                           {group.totalQuantity.toLocaleString()}
                         </TableCell>
                         <TableCell className="text-right font-mono">
-                          {formatMoney(group.avgCost, baseCurrency)}
+                          {group.valueUnavailable || group.avgCost == null ? (
+                            <UnavailableValue reason={group.unavailableReason} />
+                          ) : formatMoney(group.avgCost, baseCurrency)}
                         </TableCell>
                         <TableCell className="text-right">
-                          {group.currentPrice !== undefined ? (
+                          {group.valueUnavailable ? (
+                            <UnavailableValue reason={group.unavailableReason} />
+                          ) : group.currentPrice !== undefined ? (
                             <span className="font-mono">{formatMoney(group.currentPrice, baseCurrency)}</span>
                           ) : (
                             <span className="text-muted-foreground text-sm">N/A</span>
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <CurrencyDisplay value={group.marketValue ?? 0} currency={baseCurrency} size="sm" />
+                          {group.valueUnavailable ? (
+                            <UnavailableValue reason={group.unavailableReason} />
+                          ) : (
+                            <CurrencyDisplay value={group.marketValue ?? 0} currency={baseCurrency} size="sm" />
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <div className={cn(
-                            'font-mono text-sm',
-                            (group.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
-                          )}>
-                            {formatMoney(group.unrealizedPnL ?? 0, baseCurrency, true)}
-                          </div>
+                          {group.valueUnavailable ? (
+                            <UnavailableValue reason={group.unavailableReason} />
+                          ) : (
+                            <div className={cn(
+                              'font-mono text-sm',
+                              (group.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
+                            )}>
+                              {formatMoney(group.unrealizedPnL ?? 0, baseCurrency, true)}
+                            </div>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           {group.priceChangePercent !== undefined ? (
@@ -329,9 +360,13 @@ export function PortfolioTable() {
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <span className="text-sm text-muted-foreground">
-                            {(group.weight ?? 0).toFixed(1)}%
-                          </span>
+                          {group.valueUnavailable ? (
+                            <UnavailableValue reason={group.unavailableReason} />
+                          ) : (
+                            <span className="text-sm text-muted-foreground">
+                              {(group.weight ?? 0).toFixed(1)}%
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}></TableCell>
                       </TableRow>
@@ -365,26 +400,43 @@ export function PortfolioTable() {
                                 {lot.quantity.toLocaleString()}
                               </TableCell>
                               <TableCell className="text-right font-mono text-sm">
-                                {formatMoney(lot.avgCost, lot.costCurrency)}
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {lot.costCurrency !== group.asset.currency && (
+                                    <Badge variant="outline" className="text-[10px] font-sans font-normal px-1.5 py-0 whitespace-nowrap">
+                                      currency differs from listing
+                                    </Badge>
+                                  )}
+                                  {formatMoney(lot.avgCost, lot.costCurrency)}
+                                </div>
                               </TableCell>
                               <TableCell className="text-right text-sm text-muted-foreground">
                                 —
                               </TableCell>
                               <TableCell className="text-right">
-                                <span className="text-sm font-mono">
-                                  {formatMoney(lot.marketValue ?? 0, baseCurrency)}
-                                </span>
+                                {lot.valueUnavailable ? (
+                                  <UnavailableValue reason={lot.unavailableReason} />
+                                ) : (
+                                  <span className="text-sm font-mono">
+                                    {formatMoney(lot.marketValue ?? 0, baseCurrency)}
+                                  </span>
+                                )}
                               </TableCell>
                               <TableCell className="text-right">
-                                <div className={cn(
-                                  'font-mono text-sm',
-                                  (lot.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
-                                )}>
-                                  {formatMoney(lot.unrealizedPnL ?? 0, baseCurrency, true)}
-                                </div>
+                                {lot.valueUnavailable ? (
+                                  <UnavailableValue reason={lot.unavailableReason} />
+                                ) : (
+                                  <div className={cn(
+                                    'font-mono text-sm',
+                                    (lot.unrealizedPnL ?? 0) >= 0 ? 'text-success' : 'text-destructive'
+                                  )}>
+                                    {formatMoney(lot.unrealizedPnL ?? 0, baseCurrency, true)}
+                                  </div>
+                                )}
                               </TableCell>
                               <TableCell className="text-right text-sm text-muted-foreground">
-                                {lot.unrealizedPnLPercent !== undefined ? (
+                                {lot.valueUnavailable ? (
+                                  <UnavailableValue reason={lot.unavailableReason} />
+                                ) : lot.unrealizedPnLPercent != null ? (
                                   <PercentChange value={lot.unrealizedPnLPercent} size="sm" />
                                 ) : '—'}
                               </TableCell>
@@ -458,6 +510,19 @@ export function PortfolioTable() {
                   placeholder="Enter cost"
                 />
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-cost-currency">Cost currency</Label>
+              <Select value={editCostCurrency} onValueChange={(v) => setEditCostCurrency(v as Currency)}>
+                <SelectTrigger id="edit-cost-currency">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CURRENCIES.map(c => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-date">Purchase Date</Label>

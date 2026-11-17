@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from ..providers import PolygonProvider, FinnhubProvider, CoinGeckoProvider, YahooFinanceProvider, AlphaVantageProvider
 from ..cache import cache
 from ..config import settings
-from ..models.asset import Asset
+from .log_redaction import redact_secrets
+from ..models.asset import Asset, Currency
 from ..models.price import PriceSnapshot
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class MarketDataService:
         2. Try CoinGecko (free, no key needed)
         3. Return last known price from DB
         """
-        cache_key = f"quote:{symbol.upper()}"
+        cache_key = f"quote:v2:{symbol.upper()}"
 
         # Try cache first
         cached = await cache.get(cache_key)
@@ -58,13 +59,17 @@ class MarketDataService:
         elif not asset_type:
             asset_type = "stock"
 
+        # Polygon and Finnhub hardcode currency "USD", so they must never price
+        # an asset that is known to trade in another currency.
+        usd_fallbacks_ok = asset is None or asset.currency == Currency.USD
+
         # Try crypto provider for crypto assets
         if asset_type == "crypto":
             try:
                 quote = await self.coingecko.get_quote(symbol)
                 provider_used = "coingecko"
             except Exception as e:
-                errors.append(f"CoinGecko: {str(e)}")
+                errors.append(f"CoinGecko: {redact_secrets(e)}")
 
         # For stocks/ETFs: Yahoo first (free, always available)
         if not quote and asset_type in ["stock", "etf"]:
@@ -72,25 +77,25 @@ class MarketDataService:
                 quote = await self.yahoo.get_quote(symbol)
                 provider_used = "yahoo"
             except Exception as e:
-                errors.append(f"Yahoo: {str(e)}")
+                errors.append(f"Yahoo: {redact_secrets(e)}")
 
         # Try Polygon if configured (higher rate limits / more data)
-        if not quote and asset_type in ["stock", "etf"] and self.polygon:
+        if not quote and asset_type in ["stock", "etf"] and self.polygon and usd_fallbacks_ok:
             try:
                 quote = await self.polygon.get_quote(symbol)
                 provider_used = "polygon"
                 logger.warning("FALLBACK [%s]: Yahoo failed, using Polygon. Errors: %s", symbol, "; ".join(errors))
             except Exception as e:
-                errors.append(f"Polygon: {str(e)}")
+                errors.append(f"Polygon: {redact_secrets(e)}")
 
         # Try Finnhub as last resort
-        if not quote and self.finnhub:
+        if not quote and self.finnhub and usd_fallbacks_ok:
             try:
                 quote = await self.finnhub.get_quote(symbol)
                 provider_used = "finnhub"
                 logger.warning("FALLBACK [%s]: upstream providers failed, using Finnhub. Errors: %s", symbol, "; ".join(errors))
             except Exception as e:
-                errors.append(f"Finnhub: {str(e)}")
+                errors.append(f"Finnhub: {redact_secrets(e)}")
 
         if quote:
             quote["source"] = provider_used
@@ -170,8 +175,9 @@ class MarketDataService:
             )
             self.db.add(snapshot)
             self.db.commit()
-        except Exception:
+        except Exception as exc:
             # Don't fail if we can't store - just skip
+            logger.warning("could not store price snapshot for %s: %s", symbol, exc)
             self.db.rollback()
 
     async def _fetch_and_cache_movers(self) -> None:
@@ -188,7 +194,7 @@ class MarketDataService:
                     await cache.set("movers:losers", both["losers"], ttl=1800)
                     return
             except Exception as e:
-                logger.warning("FALLBACK [movers]: Alpha Vantage failed (%s)", e)
+                logger.warning("FALLBACK [movers]: Alpha Vantage failed (%s)", redact_secrets(e))
 
         # Try Polygon for each direction
         if self.polygon:
@@ -199,7 +205,7 @@ class MarketDataService:
                         await cache.set(f"movers:{direction}", result, ttl=1800)
                 return
             except Exception as e:
-                logger.warning("FALLBACK [movers]: Polygon failed (%s)", e)
+                logger.warning("FALLBACK [movers]: Polygon failed (%s)", redact_secrets(e))
 
         # Yahoo curated list as last resort
         try:
@@ -210,7 +216,7 @@ class MarketDataService:
             logger.warning("FALLBACK [movers]: using Yahoo curated list")
             return
         except Exception as e:
-            logger.warning("FALLBACK [movers]: Yahoo also failed (%s)", e)
+            logger.warning("FALLBACK [movers]: Yahoo also failed (%s)", redact_secrets(e))
 
         logger.warning("ALL PROVIDERS FAILED [movers]: no data available")
 

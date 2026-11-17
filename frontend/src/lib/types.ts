@@ -1,6 +1,16 @@
 export type AssetType = 'stock' | 'etf' | 'crypto' | 'fund' | 'other';
-export type MarketRegion = 'US' | 'EU' | 'ASIA';
-export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF';
+export type MarketRegion = 'US' | 'EU' | 'ASIA' | 'IL';
+export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF'
+  | 'ILS' | 'HKD' | 'CNY' | 'KRW' | 'TWD' | 'SGD' | 'INR' | 'SEK' | 'DKK' | 'NOK' | 'AUD' | 'CAD' | 'ZAR';
+
+/** Every supported currency, in display order (for currency pickers). */
+export const CURRENCIES: Currency[] = [
+  'USD', 'EUR', 'GBP', 'JPY', 'CHF',
+  'ILS', 'HKD', 'CNY', 'KRW', 'TWD', 'SGD', 'INR', 'SEK', 'DKK', 'NOK', 'AUD', 'CAD', 'ZAR',
+];
+
+/** Why the backend (or the dashboard) could not value a holding in the base currency. */
+export type UnavailableReason = 'fx_unavailable' | 'lot_currency_check' | 'price_unavailable';
 
 export interface Asset {
   id: string;
@@ -99,6 +109,9 @@ export interface HoldingWithAsset extends HoldingLot {
   unrealizedPnL?: number;
   unrealizedPnLPercent?: number;
   weight?: number;
+  /** No base-currency value: excluded from every total; value fields are unset. */
+  valueUnavailable?: boolean;
+  unavailableReason?: UnavailableReason;
 }
 
 // Grouped holdings by asset for display
@@ -107,7 +120,8 @@ export interface GroupedHolding {
   asset: Asset;
   lots: HoldingWithAsset[];
   totalQuantity: number;
-  avgCost: number;
+  /** Base-currency average cost; null when the group is valueUnavailable. */
+  avgCost: number | null;
   currentPrice?: number;
   priceChange?: number;
   priceChangePercent?: number;
@@ -115,6 +129,9 @@ export interface GroupedHolding {
   unrealizedPnL?: number;
   unrealizedPnLPercent?: number;
   weight?: number;
+  /** True when any lot is valueUnavailable (first flagged lot's reason). */
+  valueUnavailable?: boolean;
+  unavailableReason?: UnavailableReason;
 }
 
 export interface WatchlistItemWithAsset extends WatchlistItem {
@@ -197,6 +214,8 @@ export interface PriceAlert {
   assetId: string;
   symbol: string;
   name: string;
+  /** Currency code of the alert's asset (prices are in this currency). */
+  currency: string;
   rule: PriceAlertRule;
   threshold: number | null;
   intent?: PriceAlertIntent | null;

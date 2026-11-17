@@ -1,11 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List
+import logging
 import uuid
 
 from ..database import get_db
 from ..schemas import asset as schemas
 from ..models import asset as models
+
+from ..services.asset_identity import (
+    ListingUnavailable,
+    SymbolNotFound,
+    UnsupportedCurrency,
+    derive_listing,
+    listing_http_error,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -62,14 +73,40 @@ async def create_asset(
             detail=f"Asset with symbol {asset_in.symbol} already exists"
         )
 
+    symbol = asset_in.symbol.upper()
+    asset_type = schemas.AssetType(asset_in.asset_type)
+    exchange = asset_in.exchange
+    currency = asset_in.currency
+    region = asset_in.market_region
+
+    if asset_type in (schemas.AssetType.STOCK, schemas.AssetType.ETF, schemas.AssetType.FUND):
+        # Identity comes from the venue, never from the client.
+        try:
+            listing = await derive_listing(symbol)
+        except (ListingUnavailable, UnsupportedCurrency, SymbolNotFound) as e:
+            raise listing_http_error(e) from e
+        currency = listing.currency.value
+        exchange = listing.exchange
+        region = listing.market_region.value if listing.market_region else None
+        if region is None:
+            logger.warning("unknown venue %s for %s", listing.exchange, symbol)
+            region = asset_in.market_region or schemas.MarketRegion.US.value
+    elif asset_type == schemas.AssetType.CRYPTO:
+        currency = currency or schemas.Currency.USD.value
+        region = region or schemas.MarketRegion.US.value
+    else:
+        if not currency:
+            raise HTTPException(status_code=422, detail="currency is required for other assets")
+        region = region or schemas.MarketRegion.US.value
+
     asset = models.Asset(
         id=str(uuid.uuid4()),
-        symbol=asset_in.symbol.upper(),
+        symbol=symbol,
         name=asset_in.name,
-        exchange=asset_in.exchange,
-        currency=asset_in.currency,
+        exchange=exchange,
+        currency=currency,
         asset_type=asset_in.asset_type,
-        market_region=asset_in.market_region,
+        market_region=region,
         provider_ids=asset_in.provider_ids,
     )
     db.add(asset)

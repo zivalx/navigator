@@ -4,6 +4,7 @@ import { PerformanceChart } from '@/components/dashboard/PerformanceChart';
 import { TopHoldingsCard, TopMoversCard } from '@/components/dashboard/TopHoldingsCard';
 import { NewsDigestCard } from '@/components/dashboard/NewsDigestCard';
 import { AlertsCard } from '@/components/dashboard/AlertsCard';
+import { ExcludedHoldingsBanner } from '@/components/dashboard/ExcludedHoldingsBanner';
 
 const Dashboard = () => {
   return (
@@ -13,6 +14,8 @@ const Dashboard = () => {
           <h1 className="text-2xl font-bold mb-1">Dashboard</h1>
           <p className="text-muted-foreground">Your portfolio at a glance</p>
         </div>
+
+        <ExcludedHoldingsBanner />
 
         <PortfolioSummaryCards />
 

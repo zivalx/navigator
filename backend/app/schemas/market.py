@@ -16,6 +16,7 @@ class MarketRegion(str, Enum):
     US = "US"
     EU = "EU"
     ASIA = "ASIA"
+    IL = "IL"
 
 
 class MarketCard(BaseModel):
