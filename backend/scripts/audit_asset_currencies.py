@@ -28,7 +28,7 @@ from app.models.maintenance import (
 )
 from app.models.watchlist import WatchlistItem
 from app.providers.yahoo import YahooFinanceProvider
-from app.services.asset_identity import UnsupportedCurrency, identity_from_meta
+from app.services.asset_identity import ListingIdentity, UnsupportedCurrency, identity_from_meta
 
 MINOR_FACTOR = 0.01
 ALERT_FIELDS = ("threshold", "trail_amount", "high_water_mark", "triggered_price")
@@ -42,7 +42,8 @@ class AuditReport:
     converted_watch_targets: int = 0
     minor_unit_symbols: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    aborted: bool = False
+    aborted: bool = False  # nothing was written
+    incomplete: bool = False  # --apply did not complete every step
 
 
 def _utc(dt: datetime) -> datetime:
@@ -56,6 +57,20 @@ def _pre_cutover(created_at: datetime | None, cutover: datetime) -> bool:
 
 def _scale(value: float | None) -> float | None:
     return None if value is None else round(value * MINOR_FACTOR, 10)
+
+
+def _legacy_rows(db: Session, asset: Asset, cutover: datetime):
+    """Pre-cutover alerts and watch targets that hold price values."""
+    alerts = [
+        a for a in db.query(PriceAlert).filter(PriceAlert.asset_id == asset.id)
+        if _pre_cutover(a.created_at, cutover)
+        and any(getattr(a, f) is not None for f in ALERT_FIELDS)
+    ]
+    targets = [
+        t for t in db.query(WatchlistItem).filter(WatchlistItem.asset_id == asset.id)
+        if t.target_price is not None and _pre_cutover(t.created_at, cutover)
+    ]
+    return alerts, targets
 
 
 async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
@@ -77,8 +92,9 @@ async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
         print("alert and target conversion already done: skipping that step", file=out)
 
     # (asset, identity) of assets to fix; (asset) of minor-unit assets to convert.
-    fixes: list[tuple[Asset, object]] = []
+    fixes: list[tuple[Asset, ListingIdentity]] = []
     minor_assets: list[Asset] = []
+    skipped_assets: list[Asset] = []
     unreachable = False
 
     provider = YahooFinanceProvider()
@@ -89,17 +105,20 @@ async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
             except (httpx.HTTPError, ValueError) as e:
                 print(f"{asset.symbol}: skipped (yahoo unreachable: {type(e).__name__})", file=out)
                 report.skipped.append(asset.symbol)
+                skipped_assets.append(asset)
                 unreachable = True
                 continue
             if meta is None:
                 print(f"{asset.symbol}: skipped (symbol not found)", file=out)
                 report.skipped.append(asset.symbol)
+                skipped_assets.append(asset)
                 continue
             try:
                 ident = identity_from_meta(asset.symbol, meta)
             except UnsupportedCurrency as e:
                 print(f"{asset.symbol}: skipped (unsupported currency {e.code})", file=out)
                 report.skipped.append(asset.symbol)
+                skipped_assets.append(asset)
                 continue
 
             diffs = []
@@ -136,20 +155,25 @@ async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
     target_rows: list[WatchlistItem] = []
     if convert:
         for asset in minor_assets:
-            alerts = [
-                a for a in db.query(PriceAlert).filter(PriceAlert.asset_id == asset.id)
-                if _pre_cutover(a.created_at, cutover)
-                and any(getattr(a, f) is not None for f in ALERT_FIELDS)
-            ]
-            targets = [
-                t for t in db.query(WatchlistItem).filter(WatchlistItem.asset_id == asset.id)
-                if t.target_price is not None and _pre_cutover(t.created_at, cutover)
-            ]
+            alerts, targets = _legacy_rows(db, asset, cutover)
             if alerts or targets:
                 print(f"{asset.symbol}: {len(alerts)} alert(s), {len(targets)} watch target(s)"
                       " priced in minor units", file=out)
             alert_rows += alerts
             target_rows += targets
+
+    # Assets whose listing is unknown cannot be converted; legacy price data on
+    # them would be un-paused by the marker while still in minor units.
+    blocked = False
+    if convert:
+        for asset in skipped_assets:
+            alerts, targets = _legacy_rows(db, asset, cutover)
+            if alerts or targets:
+                blocked = True
+                print(f"{asset.symbol}: {len(alerts)} alert(s), {len(targets)} watch target(s) "
+                      "not converted (listing unknown) - delete or edit them, then re-run", file=out)
+
+    report.incomplete = bool(report.skipped) or cutover is None
 
     if not apply:
         print(f"dry run: {len(report.asset_fixes)} asset(s) to fix, "
@@ -157,10 +181,11 @@ async def audit(db: Session, *, apply: bool, out: TextIO) -> AuditReport:
               "re-run with --apply to write", file=out)
         return report
 
-    if unreachable:
-        report.aborted = True
-        print("aborted: Yahoo was unreachable for some assets, nothing was written; "
-              "re-run when it is back", file=out)
+    if unreachable or blocked:
+        report.aborted = report.incomplete = True
+        print("aborted: nothing was written" + (
+            "; Yahoo was unreachable for some assets, re-run when it is back" if unreachable else ""),
+            file=out)
         return report
 
     for asset, ident in fixes:
@@ -191,14 +216,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="write the fixes (default: dry run)")
     args = parser.parse_args(argv)
 
-    from app.database import SessionLocal
+    import logging
 
+    from app.database import SessionLocal, engine
+
+    # Never let SQL echo (dev mode) print row values.
+    engine.echo = False
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     db = SessionLocal()
     try:
         report = asyncio.run(audit(db, apply=args.apply, out=sys.stdout))
     finally:
         db.close()
-    return 1 if report.aborted else 0
+    return 1 if (report.aborted or (args.apply and report.incomplete)) else 0
 
 
 if __name__ == "__main__":

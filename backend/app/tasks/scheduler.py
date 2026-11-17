@@ -294,7 +294,8 @@ async def evaluate_price_alerts() -> None:
                 created = alert.created_at
                 if created is not None and created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
-                if created is not None and created < cutover:
+                # NULL created_at counts as pre-cutover (same as the audit).
+                if created is None or created < cutover:
                     paused_symbols.add(alert.asset.symbol)
                     continue
 

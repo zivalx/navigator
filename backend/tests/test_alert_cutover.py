@@ -87,3 +87,13 @@ async def test_paused_trailing_stop_does_not_ratchet(eval_db, monkeypatch):
     await scheduler_module.evaluate_price_alerts()
     a = reload_alert(eval_db, aid)
     assert a.is_active and a.high_water_mark == 2600.0
+
+
+@pytest.mark.asyncio
+async def test_null_created_at_alert_paused_like_pre_cutover(eval_db, monkeypatch):
+    set_marker(eval_db, CUTOVER_MARKER, at=T)
+    aid = _setup(eval_db, None)
+    patch_quotes(monkeypatch, {"TEVA.TA": {"price": 26.0, "unitFactor": 0.01}})
+    await scheduler_module.evaluate_price_alerts()
+    a = reload_alert(eval_db, aid)
+    assert a.is_active and a.triggered_at is None

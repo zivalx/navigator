@@ -176,3 +176,68 @@ async def test_yahoo_failure_is_skipped_and_blocks_apply(db_session, yahoo):
     assert "DOWN: skipped (" in out.getvalue()
     assert report.skipped == ["DOWN"] and report.aborted
     assert get_marker(db_session, ALERTS_CONVERTED_MARKER) is None
+
+
+def _legacy_alert(db, symbol):
+    asset = make_asset(db, symbol=symbol, currency=Currency.USD)
+    alert = make_alert(db, asset, threshold=2600.0)
+    alert.created_at = PRE
+    db.commit()
+    return alert.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [None, {"currency": "BRL", "exchangeName": "SAO"}])
+async def test_skipped_asset_with_legacy_alert_blocks_apply(db_session, yahoo, bad):
+    asset_id, pre_id, _, item_id, _ = _setup(db_session)
+    yahoo["OLD.TA"] = bad
+    other_id = _legacy_alert(db_session, "OLD.TA")
+    out = io.StringIO()
+    report = await audit(db_session, apply=True, out=out)
+    text = out.getvalue()
+    assert "OLD.TA: 1 alert(s), 0 watch target(s) not converted (listing unknown)" in text
+    assert "delete or edit them, then re-run" in text
+    assert report.aborted and report.converted_alerts == 0
+    db_session.expire_all()
+    assert get_marker(db_session, ALERTS_CONVERTED_MARKER) is None
+    assert db_session.get(PriceAlert, other_id).threshold == 2600.0
+    assert db_session.get(PriceAlert, pre_id).threshold == 2600.0
+    assert db_session.get(Asset, asset_id).currency == Currency.USD  # one transaction: nothing applied
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad,reason", [
+    (None, "symbol not found"),
+    ({"currency": "BRL", "exchangeName": "SAO"}, "unsupported currency BRL"),
+])
+async def test_skip_without_legacy_data_still_applies_but_is_incomplete(db_session, yahoo, bad, reason):
+    _setup(db_session)
+    yahoo["GONE"] = bad
+    make_asset(db_session, symbol="GONE")
+    out = io.StringIO()
+    report = await audit(db_session, apply=True, out=out)
+    assert f"GONE: skipped ({reason})" in out.getvalue()
+    assert not report.aborted and report.incomplete and report.skipped == ["GONE"]
+    assert get_marker(db_session, ALERTS_CONVERTED_MARKER) is not None
+
+
+@pytest.mark.asyncio
+async def test_no_cutover_marker_notes_and_is_incomplete(db_session):
+    _teva(db_session)
+    out = io.StringIO()
+    report = await audit(db_session, apply=True, out=out)
+    assert "no cutover marker found: price conversion is skipped" in out.getvalue()
+    assert report.incomplete and report.converted_alerts == 0
+    assert get_marker(db_session, ALERTS_CONVERTED_MARKER) is None
+
+
+def test_main_exit_codes(monkeypatch):
+    import scripts.audit_asset_currencies as m
+    from app.database import SessionLocal  # noqa: F401
+
+    for report, code in [(m.AuditReport(), 0), (m.AuditReport(incomplete=True), 1),
+                         (m.AuditReport(aborted=True), 1)]:
+        async def fake(db, *, apply, out, r=report):
+            return r
+        monkeypatch.setattr(m, "audit", fake)
+        assert m.main(["--apply"]) == code
