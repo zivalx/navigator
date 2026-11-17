@@ -243,6 +243,21 @@ async def evaluate_price_alerts() -> None:
     """
     db = SessionLocal()
     try:
+        # Alerts created before the minor-unit cutover hold thresholds in the
+        # old unit (agorot/pence); until the audit converts them, a quote with
+        # a unit factor or a stale cache fallback (no unit info) can't be
+        # compared safely, so those alerts are paused. The markers are read
+        # BEFORE the alerts are loaded: if the audit commits its conversion
+        # while this run awaits quotes, the rows loaded here are still in the
+        # old unit, so the pause must hold for the whole run.
+        cutover = get_marker(db, CUTOVER_MARKER)
+        pause_active = (
+            cutover is not None
+            and get_marker(db, ALERTS_CONVERTED_MARKER) is None
+        )
+        if pause_active and cutover.tzinfo is None:
+            cutover = cutover.replace(tzinfo=timezone.utc)
+
         alerts = (
             db.query(PriceAlert)
             .filter(PriceAlert.is_active.is_(True))
@@ -265,17 +280,6 @@ async def evaluate_price_alerts() -> None:
             await notify_triggered_alerts(db)
             return
 
-        # Alerts created before the minor-unit cutover hold thresholds in the
-        # old unit (agorot/pence); until the audit converts them, a quote with
-        # a unit factor or a stale cache fallback (no unit info) can't be
-        # compared safely, so those alerts are paused.
-        cutover = get_marker(db, CUTOVER_MARKER)
-        pause_active = (
-            cutover is not None
-            and get_marker(db, ALERTS_CONVERTED_MARKER) is None
-        )
-        if pause_active and cutover.tzinfo is None:
-            cutover = cutover.replace(tzinfo=timezone.utc)
         paused_symbols: set[str] = set()
 
         triggered_count = 0

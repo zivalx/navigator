@@ -97,3 +97,32 @@ async def test_null_created_at_alert_paused_like_pre_cutover(eval_db, monkeypatc
     await scheduler_module.evaluate_price_alerts()
     a = reload_alert(eval_db, aid)
     assert a.is_active and a.triggered_at is None
+
+
+@pytest.mark.asyncio
+async def test_conversion_committed_during_fetch_does_not_unpause_stale_rows(eval_db, monkeypatch):
+    """The audit's --apply can commit converted thresholds plus the converted
+    marker while the run awaits quotes. The run's alert rows were loaded
+    before that (still in agorot), so the marker must not lift the pause for
+    this run: 2500 agorot vs a ₪26 quote would falsely trigger."""
+    from sqlalchemy.orm import Session
+
+    from app.models.alert import PriceAlert
+    from app.services.market_data import MarketDataService
+
+    set_marker(eval_db, CUTOVER_MARKER, at=T)
+    aid = _setup(eval_db, T - timedelta(hours=1), threshold=2500.0)  # ₪25.00 in agorot
+
+    async def fetch_while_audit_applies(self, symbols):
+        # The audit runs in its own session and commits mid-fetch.
+        audit = Session(bind=eval_db.get_bind())
+        audit.get(PriceAlert, aid).threshold = 25.0
+        set_marker(audit, ALERTS_CONVERTED_MARKER)
+        audit.close()
+        return {"TEVA.TA": {"price": 26.0, "unitFactor": 0.01}}
+
+    monkeypatch.setattr(MarketDataService, "get_quotes", fetch_while_audit_applies)
+    await scheduler_module.evaluate_price_alerts()
+    a = reload_alert(eval_db, aid)
+    assert a.is_active and a.triggered_at is None
+    assert a.threshold == 25.0
