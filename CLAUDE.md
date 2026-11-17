@@ -14,6 +14,7 @@ backend/app/
   tasks/       # APScheduler jobs (scheduler.py)
   models/ schemas/  # SQLAlchemy models, Pydantic schemas
   config.py    # Settings (env-driven), database.py, cache.py, main.py
+backend/scripts/   # one-off ops scripts (audit_asset_currencies.py)
 backend/seed.py, seed_watchlists.py   # sample data
 frontend/src/
   pages/       # Dashboard (Index.tsx), Portfolio, Watchlist, Markets, Heatmap, Settings
@@ -106,11 +107,9 @@ for defaults.
 
 ## Tests
 
-No `backend/tests/` directory exists yet. `backend/.venv` has `pytest` +
-`pytest-asyncio` installed and `backend/README.md` documents `pytest` as the test
-command — the market-indicators design doc calls out that its implementation is
-expected to bootstrap the test suite (CNN/alternative.me parser fixtures, `^TNX`/`^TYX`
-scaling, endpoint partial-failure behavior). No frontend test setup was found either.
+Backend: ~200 tests in `backend/tests/`; run `pytest -q` from `backend/`. The Postgres
+enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_migration.py`
+(skipped otherwise). No frontend test setup was found.
 
 ## Gotchas
 
@@ -118,6 +117,27 @@ scaling, endpoint partial-failure behavior). No frontend test setup was found ei
   Yahoo scaled by 10 — divide value and change by 10 to get the real percentage. This
   isn't yet implemented anywhere in `providers/yahoo.py`; it's a documented requirement
   for the indicators work, not existing behavior.
+- **Yahoo minor units are normalized to major units** (ILA agorot, GBp/GBX pence, ZAc)
+  at every Yahoo entry point via `services/currency_units.py` `normalize_quote_currency`.
+  Quotes carry `unitFactor`; the quote cache key is `quote:v2:{SYMBOL}` (v2 so
+  pre-normalization entries are ignored). Never price non-USD assets with USD-only fallbacks.
+- **Enum migration**: new currencies (ILS HKD CNY KRW TWD SGD INR SEK DKK NOK AUD CAD ZAR)
+  and region IL are added to Postgres enums by `_migrate_enum_values` in `init_db()`
+  (`ALTER TYPE ... ADD VALUE IF NOT EXISTS`). The whole Postgres init runs under a
+  `pg_advisory_lock` so concurrent workers don't race; it also writes the
+  `minor_units_cutover` marker into the `maintenance_runs` table.
+- **Cutover marker and paused alerts**: price alerts on minor-unit listings (or on stale
+  quotes) created before the cutover are paused until the audit script's `--apply`
+  writes `minor_unit_alerts_converted`. Holdings that can't be valued are flagged
+  `valueUnavailable` + `unavailableReason` (fx_unavailable | lot_currency_check |
+  price_unavailable) and excluded from totals; the EOD snapshot is skipped if a rate is missing.
+- **Audit script + deploy order**: `docker compose exec api python -m scripts.audit_asset_currencies`
+  is a dry run (prints symbols/codes/counts only); `--apply` fixes asset
+  currency/region/exchange and converts pre-cutover alert/watch-target prices x0.01 once.
+  It never changes lots and exits 1 if a listing can't be verified and has legacy price
+  rows. Deploy Navigator first -> audit dry run -> `--apply` -> then trender.
+  `POST /assets/` for stock/etf/fund derives currency/exchange/region from Yahoo (503 if
+  unreachable, 422 unsupported currency). Spec: `docs/superpowers/specs/2026-11-17-tase-ils-support-design.md`.
 - Ports: backend 7000, frontend dev 7070 (not the 8000/5173 in the older docs).
 - No Alembic migrations are actually applied/initialized — schema comes from
   `Base.metadata.create_all()`. If you add models, no migration step is needed locally.
