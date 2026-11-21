@@ -79,7 +79,10 @@ async def create_asset(
     currency = asset_in.currency
     region = asset_in.market_region
 
-    if asset_type in (schemas.AssetType.STOCK, schemas.AssetType.ETF, schemas.AssetType.FUND):
+    if asset_type in (
+        schemas.AssetType.STOCK, schemas.AssetType.ETF,
+        schemas.AssetType.FUND, schemas.AssetType.INDEX,
+    ):
         # Identity comes from the venue, never from the client.
         try:
             listing = await derive_listing(symbol)

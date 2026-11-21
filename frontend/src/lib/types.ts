@@ -1,4 +1,4 @@
-export type AssetType = 'stock' | 'etf' | 'crypto' | 'fund' | 'other';
+export type AssetType = 'stock' | 'etf' | 'crypto' | 'fund' | 'index' | 'other';
 export type MarketRegion = 'US' | 'EU' | 'ASIA' | 'IL';
 export type Currency = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF'
   | 'ILS' | 'HKD' | 'CNY' | 'KRW' | 'TWD' | 'SGD' | 'INR' | 'SEK' | 'DKK' | 'NOK' | 'AUD' | 'CAD' | 'ZAR';

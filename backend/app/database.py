@@ -86,6 +86,8 @@ def _apply_enum_values(target_engine):
         for code in _NEW_CURRENCY_VALUES
     ]
     statements.append("ALTER TYPE marketregion ADD VALUE IF NOT EXISTS 'IL'")
+    # SQLAlchemy stores enum member names, so the label is 'INDEX'.
+    statements.append("ALTER TYPE assettype ADD VALUE IF NOT EXISTS 'INDEX'")
     with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         for statement in statements:
             conn.exec_driver_sql(statement)

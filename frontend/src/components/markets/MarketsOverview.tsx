@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -10,7 +11,8 @@ import { MarketAssetCard } from './MarketAssetCard';
 import { AddMarketCardDialog } from './AddMarketCardDialog';
 import { useMarketCards } from '@/contexts/MarketCardsContext';
 import { defaultMarketCards } from '@/lib/marketCardTypes';
-import { toast } from 'sonner';
+import { api } from '@/lib/api';
+import { useAppSettings } from '@/contexts/AppSettingsContext';
 
 type Region = 'ALL' | MarketRegion;
 
@@ -27,9 +29,25 @@ export function MarketsOverview() {
     return matchesRegion && matchesSearch;
   });
 
-  // Compute real gainers/losers from market cards with prices
-  const { gainers, losers } = useMemo(() => {
+  const { refreshIntervalMs } = useAppSettings();
+  const isIsrael = activeRegion === 'IL';
+
+  // Israel: the backend scans Tel Aviv large caps (prices in ILS major units).
+  const { data: ilMovers, isLoading: ilMoversLoading } = useQuery({
+    queryKey: ['market-movers', 'IL'],
+    queryFn: async () => {
+      const [g, l] = await Promise.all([api.getTopGainers(5, 'IL'), api.getTopLosers(5, 'IL')]);
+      return { gainers: g, losers: l };
+    },
+    enabled: isIsrael,
+    refetchInterval: refreshIntervalMs,
+  });
+
+  // Other tabs: real gainers/losers from the stock cards shown in that tab.
+  const cardMovers = useMemo(() => {
     const withChange = cards
+      .filter(c => c.assetType !== 'index')
+      .filter(c => activeRegion === 'ALL' || c.region === activeRegion)
       .filter(c => c.changePercent !== undefined && c.price !== undefined)
       .map(c => ({ symbol: c.symbol, name: c.name, price: c.price!, currency: c.currency || 'USD', change: c.changePercent! }));
     const sorted = [...withChange].sort((a, b) => b.change - a.change);
@@ -37,7 +55,21 @@ export function MarketsOverview() {
       gainers: sorted.filter(s => s.change > 0).slice(0, 5),
       losers: sorted.filter(s => s.change < 0).reverse().slice(0, 5),
     };
-  }, [cards]);
+  }, [cards, activeRegion]);
+
+  const { gainers, losers } = useMemo(() => {
+    if (!isIsrael) return cardMovers;
+    type Quote = { symbol: string; name?: string; price: number; currency?: string; changePercent?: number };
+    const toRow = (q: Quote) => ({
+      symbol: q.symbol, name: q.name ?? '', price: q.price, currency: q.currency || 'ILS', change: q.changePercent ?? 0,
+    });
+    return {
+      gainers: ((ilMovers?.gainers ?? []) as Quote[]).map(toRow),
+      losers: ((ilMovers?.losers ?? []) as Quote[]).map(toRow),
+    };
+  }, [isIsrael, cardMovers, ilMovers]);
+  const moversEmpty = (kind: string) =>
+    isIsrael && ilMoversLoading ? 'Loading Tel Aviv movers…' : `No ${kind} today`;
 
   const handleResetCards = () => {
     localStorage.setItem('marketCards', JSON.stringify(defaultMarketCards));
@@ -136,6 +168,7 @@ export function MarketsOverview() {
           <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <TrendingUp className="h-5 w-5 text-success" />
             Top Gainers
+            {isIsrael && <span className="text-xs font-normal text-muted-foreground">Tel Aviv large caps</span>}
           </h3>
           <div className="space-y-2">
             {gainers.length > 0 ? gainers.map((stock) => (
@@ -153,7 +186,7 @@ export function MarketsOverview() {
                 </div>
               </div>
             )) : (
-              <p className="text-sm text-muted-foreground py-4 text-center">No gainers today</p>
+              <p className="text-sm text-muted-foreground py-4 text-center">{moversEmpty('gainers')}</p>
             )}
           </div>
         </div>
@@ -163,6 +196,7 @@ export function MarketsOverview() {
           <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <TrendingDown className="h-5 w-5 text-destructive" />
             Top Losers
+            {isIsrael && <span className="text-xs font-normal text-muted-foreground">Tel Aviv large caps</span>}
           </h3>
           <div className="space-y-2">
             {losers.length > 0 ? losers.map((stock) => (
@@ -180,7 +214,7 @@ export function MarketsOverview() {
                 </div>
               </div>
             )) : (
-              <p className="text-sm text-muted-foreground py-4 text-center">No losers today</p>
+              <p className="text-sm text-muted-foreground py-4 text-center">{moversEmpty('losers')}</p>
             )}
           </div>
         </div>
