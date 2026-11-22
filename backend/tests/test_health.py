@@ -156,6 +156,35 @@ def test_each_check(name, setup, ok, db_session, monkeypatch):
     assert deep_checks(db_session, NOW)[name].ok is ok
 
 
+def test_alert_delivery_detail_all_delivered(db_session):
+    healthy(db_session)
+    _alert_ok(db_session, None)
+    c = deep_checks(db_session, NOW)["alert_delivery"]
+    assert c.ok and c.detail == "all delivered"
+
+
+def test_alert_delivery_skipped_no_channel_is_ok_with_honest_detail(db_session):
+    healthy(db_session)
+    a = us(db_session)
+    for mins in (30, 600):
+        alert(db_session, a, triggered_at=NOW - timedelta(minutes=mins),
+              notification_skipped_at=NOW - timedelta(minutes=mins))
+    # older than the window: not counted
+    alert(db_session, a, triggered_at=NOW - timedelta(days=3), notification_skipped_at=NOW - timedelta(days=3))
+    c = deep_checks(db_session, NOW)["alert_delivery"]
+    assert c.ok
+    assert c.detail == "no channel configured; 2 alert(s) in-app only (last 24h)"
+
+
+def test_alert_delivery_failure_wins_over_skipped(db_session):
+    healthy(db_session)
+    a = us(db_session)
+    alert(db_session, a, triggered_at=NOW - timedelta(minutes=30), notification_skipped_at=NOW - timedelta(minutes=30))
+    _alert_fail(db_session, None)
+    c = deep_checks(db_session, NOW)["alert_delivery"]
+    assert not c.ok and "undelivered" in c.detail
+
+
 def test_fresh_install_is_ok(db_session):
     hb(db_session, "scheduler_leader", started=NOW - timedelta(minutes=1))
     assert overall_status(deep_checks(db_session, NOW)) == "ok"

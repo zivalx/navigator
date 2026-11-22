@@ -75,6 +75,8 @@ def open_grace(quote_minutes: int) -> timedelta:
     return timedelta(minutes=2 * quote_minutes)
 
 
+# Look-back for alerts skipped because no notification channel was configured.
+ALERT_SKIPPED_WINDOW = timedelta(hours=24)
 ALERT_DELIVERY_LIMIT = alert_delivery_limit(settings.alert_evaluation_interval_minutes)
 PRICE_FRESH_FOR = timedelta(minutes=POLLS_TOLERATED * settings.quote_refresh_interval_minutes)
 OPEN_GRACE = open_grace(settings.quote_refresh_interval_minutes)
@@ -179,6 +181,16 @@ def _check_alert_delivery(db: Session, now: datetime) -> Check:
     stuck = sum(1 for (t,) in rows if now - _ensure_aware(t) > ALERT_DELIVERY_LIMIT)
     if stuck:
         return Check(False, f"{stuck} triggered alerts undelivered for {_age(ALERT_DELIVERY_LIMIT)}+")
+    # No channel configured is a legitimate setup (alerts stay visible in the
+    # app), so it stays ok - but "all delivered" would be untrue for them.
+    skipped = (
+        db.query(PriceAlert.notification_skipped_at)
+        .filter(PriceAlert.notified_at.is_(None), PriceAlert.notification_skipped_at.isnot(None))
+        .all()
+    )
+    in_app_only = sum(1 for (t,) in skipped if now - _ensure_aware(t) <= ALERT_SKIPPED_WINDOW)
+    if in_app_only:
+        return Check(True, f"no channel configured; {in_app_only} alert(s) in-app only (last 24h)")
     return Check(True, "all delivered")
 
 
