@@ -37,3 +37,44 @@ def test_redis_command_reads_password_from_container_env():
     joined = command if isinstance(command, str) else " ".join(command)
     assert "${REDIS_PASSWORD}" not in joined  # would be interpolated into argv
     assert "$$REDIS_PASSWORD" in joined
+
+
+ROOT = Path(__file__).resolve().parents[2]
+DOCKERFILES = [ROOT / "backend" / "Dockerfile.prod", ROOT / "backend" / "Dockerfile", ROOT / "frontend" / "Dockerfile"]
+
+
+def _instructions(path):
+    return [ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#")]
+
+
+def test_download_runs_mount_optional_corp_ca_secret():
+    for path in DOCKERFILES:
+        blocks = [b for b in path.read_text().split("\nRUN ")[1:] if "pip install" in b or "npm ci" in b]
+        assert len(blocks) == 1, path
+        head = blocks[0].split("pip install")[0].split("npm ci")[0]
+        assert "--mount=type=secret,id=corp_ca,required=false" in head, path
+        assert "/run/secrets/corp_ca" in head, path
+
+
+def test_no_cert_copied_or_in_env():
+    import re
+
+    for path in DOCKERFILES:
+        for ln in _instructions(path):
+            if re.match(r"\s*(COPY|ADD)\b", ln):
+                assert not re.search(r"\.(pem|crt|cer)\b|corp_ca", ln), (path, ln)
+            if re.match(r"\s*(ENV|ARG)\b", ln):
+                assert not re.search(r"corp_ca|SSL_CERT|PIP_CERT|CA_CERTS|\.pem", ln, re.I), (path, ln)
+
+
+def test_build_script_passes_secret_only_when_corp_ca_set():
+    text = (ROOT / "scripts" / "build-images.sh").read_text()
+    assert text.count("--secret") == 2
+    _, rest = text.split('if [ -n "${CORP_CA:-}" ]; then', 1)
+    branch, other = rest.split("else", 1)
+    assert branch.count("--secret id=corp_ca,src=\"$CORP_CA\"") == 2
+    assert "--secret" not in other
+
+
+def test_deploy_script_does_not_use_corp_ca():
+    assert "corp_ca" not in (ROOT / "scripts" / "deploy.sh").read_text().lower()
