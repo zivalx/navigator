@@ -1,4 +1,5 @@
 """Alembic migrations against a real Postgres (opt-in: TEST_POSTGRES_URL)."""
+import logging
 import threading
 from datetime import date, datetime, timezone
 
@@ -248,8 +249,14 @@ _SEED = [
 ]
 
 
+def _utc(ts: str) -> datetime:
+    return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+
+
 @requires_pg
-def test_pg_0002_dedupe():
+def test_pg_0002_dedupe(caplog):
+    from app.services.portfolio import PortfolioService
+
     with scratch_schema() as eng:
         cfg = alembic_config(eng)
         command.upgrade(cfg, "0001")
@@ -260,24 +267,32 @@ def test_pg_0002_dedupe():
                 f"('{_CRYPTO}', 'BTC', 'Bitcoin', 'USD', 'CRYPTO', 'US'), "
                 f"('{_TA}', 'TEVA.TA', 'Teva', 'ILS', 'STOCK', 'IL')"
             )
-            for id_, asset, ts, source, _ in _SEED:
+            for n, (id_, asset, ts, source, _) in enumerate(_SEED):
                 c.execute(text(
                     "INSERT INTO price_snapshots (id, asset_id, price, currency, timestamp, source) "
-                    "VALUES (:id, :a, 50.0, 'USD', CAST(:ts AS timestamptz), :s)"
-                ), {"id": id_, "a": asset, "ts": f"{ts}+00", "s": source})
+                    "VALUES (:id, :a, :p, 'USD', CAST(:ts AS timestamptz), :s)"
+                ), {"id": id_, "a": asset, "p": 50.0 + n, "ts": f"{ts}+00", "s": source})
 
-        command.upgrade(cfg, "head")
+        with caplog.at_level(logging.WARNING, logger="alembic"):
+            command.upgrade(cfg, "head")
+        # Only the count is logged: Tue 3->1, US Wed 2->1, Fri+Sat 2->1, crypto Wed 2->1.
+        assert "0002: removed 5 duplicate EOD price rows" in caplog.messages
 
-        # Expected survivor per key: the latest timestamp (ids sort with it here).
-        expected = {}
-        for id_, asset, ts, _, td in _SEED:
-            if td is not None and ts >= expected.get((asset, td), ("", ""))[1]:
-                expected[(asset, td)] = (id_, ts)
+        # Expected survivor per key: the latest row (ids sort with it here), with
+        # its own price, stamped with the group's earliest timestamp.
+        groups = {}
+        for n, (id_, asset, ts, _, td) in enumerate(_SEED):
+            if td is not None:
+                groups.setdefault((asset, td), []).append((ts, id_, 50.0 + n))
+        expected = sorted(
+            (a, td, max(rows)[1], max(rows)[2], _utc(min(rows)[0])) for (a, td), rows in groups.items()
+        )
         with eng.connect() as c:
             kept = c.exec_driver_sql(
-                "SELECT asset_id, trade_date, id FROM price_snapshots WHERE trade_date IS NOT NULL"
+                "SELECT asset_id, trade_date, id, price, timestamp FROM price_snapshots "
+                "WHERE trade_date IS NOT NULL"
             ).all()
-            assert sorted(kept) == sorted((a, td, v[0]) for (a, td), v in expected.items())
+            assert sorted(tuple(r) for r in kept) == expected
             assert c.exec_driver_sql(
                 "SELECT count(*) FROM price_snapshots WHERE asset_id IN (%(us)s, %(ta)s) "
                 "AND trade_date IS NOT NULL AND EXTRACT(ISODOW FROM trade_date) IN (6, 7)",
@@ -286,6 +301,21 @@ def test_pg_0002_dedupe():
             quotes = c.exec_driver_sql(
                 "SELECT trade_date FROM price_snapshots WHERE source = 'yahoo'").scalars().all()
             assert len(quotes) == 3 and all(td is None for td in quotes)
+
+        # History reads keep resolving to the same trade day's close.
+        db = database.sessionmaker(bind=eng)()
+        try:
+            latest = PortfolioService(db)._latest_snapshot
+            # Fri 21:30 < when < Sat 21:30 (and before Saturday's 15:00 quote):
+            # Friday's close, not an earlier day.
+            fri = latest(_US, _utc("2026-11-21 10:00"))
+            assert (fri.id, fri.trade_date) == ("us-sat", date(2026, 11, 20))
+            # Between Tuesday's 16:30 and 16:35 ET snapshots: Tuesday's close,
+            # not Tuesday's 15:00 UTC intraday quote.
+            tue = latest(_US, _utc("2026-11-17 21:32"))
+            assert (tue.id, tue.trade_date) == ("us-tue-1635", date(2026, 11, 17))
+        finally:
+            db.close()
 
         with pytest.raises(IntegrityError):
             with eng.begin() as c:
