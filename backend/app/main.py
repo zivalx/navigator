@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from .config import settings
 from .cache import cache
 from .database import init_db
-from .tasks.scheduler import start_scheduler, shutdown_scheduler
+from .tasks import leader as scheduler_leader
 
 
 @asynccontextmanager
@@ -21,13 +21,19 @@ async def lifespan(app: FastAPI):
     await cache.connect()
     print("✅ Redis connected")
 
-    start_scheduler()
-    print("Scheduler started")
+    # Every worker runs the leader loop; only the advisory-lock holder runs jobs.
+    leader = scheduler_leader.make_leader()
+    if leader is not None:
+        scheduler_leader.set_current(leader)
+        await leader.start()
+        print("Scheduler leader loop started")
 
     yield
 
     # Shutdown
-    shutdown_scheduler()
+    if leader is not None:
+        await leader.stop()
+        scheduler_leader.set_current(None)
     await cache.disconnect()
     print("Shutting down...")
 

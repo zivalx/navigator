@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     app_env: str = "development"
     secret_key: str = "dev-secret-key-change-in-production"
     cors_origins: str = "http://localhost:5173,http://localhost:7070,http://localhost:3000,http://localhost:3002"
+    # false: this process runs no scheduler leader loop (scripts, a laptop on a shared DB)
+    scheduler_enabled: bool = True
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/navigator"

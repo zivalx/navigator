@@ -17,6 +17,7 @@ from ..services.currency_units import normalize_quote_currency
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
+from ..services.log_redaction import redact_secrets
 from ..services.portfolio import PortfolioService
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,12 @@ YAHOO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 }
 
-_scheduler: AsyncIOScheduler | None = None
+NEW_YORK = "America/New_York"
+# Cron jobs run in New York time; everything else in UTC. A missed run within
+# misfire_grace_time still runs (once: coalesce); later than that it is skipped.
+JOB_DEFAULTS = {"coalesce": True, "max_instances": 1, "misfire_grace_time": 120}
+DAILY_MISFIRE_SECONDS = 3600
+LEADER_STARTUP_MISFIRE_SECONDS = 300
 
 
 async def snapshot_eod_prices() -> None:
@@ -393,87 +399,67 @@ async def notify_triggered_alerts(db) -> None:
             )
 
 
-def start_scheduler() -> None:
-    """Start the APScheduler with EOD and backfill jobs."""
-    global _scheduler
-    _scheduler = AsyncIOScheduler()
+async def leader_startup() -> None:
+    """Runs once per new leadership, shortly after the lock is taken. Each
+    step runs even if an earlier one failed; every step is idempotent."""
+    for step in (
+        backfill_historical_prices,
+        backfill_daily_snapshots_job,  # after prices: it needs price history
+        breadth_service.ensure_breadth_warm,
+    ):
+        try:
+            await step()
+        except Exception as e:
+            logger.error("leader_startup: %s failed: %s", step.__name__, redact_secrets(e))
 
-    # Daily EOD snapshot at 16:30 US/Eastern (after market close)
-    _scheduler.add_job(
+
+def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
+    """The leader's scheduler with every job added, not started. With
+    `startup_at`, `leader_startup` is added as a date job at that time."""
+    scheduler = AsyncIOScheduler(timezone="UTC", job_defaults=JOB_DEFAULTS)
+
+    # Daily EOD snapshot at 16:30 New York (after market close)
+    scheduler.add_job(
         snapshot_eod_prices,
         "cron",
         hour=16,
         minute=30,
-        timezone="US/Eastern",
+        timezone=NEW_YORK,
         id="eod_snapshot",
         name="EOD Price Snapshot",
-        replace_existing=True,
+        misfire_grace_time=DAILY_MISFIRE_SECONDS,
     )
 
-    # Daily market breadth computation (S5FI/S5TH) at 17:00 US/Eastern,
+    # Daily market breadth computation (S5FI/S5TH) at 17:00 New York,
     # shortly after the EOD snapshot.
-    _scheduler.add_job(
+    scheduler.add_job(
         breadth_service.compute_and_store_breadth,
         "cron",
         hour=17,
         minute=0,
-        timezone="US/Eastern",
+        timezone=NEW_YORK,
         id="breadth_snapshot",
         name="Market Breadth Computation (S5FI/S5TH)",
-        replace_existing=True,
+        misfire_grace_time=DAILY_MISFIRE_SECONDS,
     )
 
-    # Run backfill once, 15 seconds after startup (non-blocking)
-    from datetime import timedelta
-    _scheduler.add_job(
-        backfill_historical_prices,
-        "date",
-        run_date=datetime.now(timezone.utc) + timedelta(seconds=15),
-        id="backfill_historical",
-        name="Historical Price Backfill",
-        replace_existing=True,
-    )
-
-    # Warm the breadth cache once, 30 seconds after startup, if cold
-    # (non-blocking; skips the network-heavy computation if already cached).
-    _scheduler.add_job(
-        breadth_service.ensure_breadth_warm,
-        "date",
-        run_date=datetime.now(timezone.utc) + timedelta(seconds=30),
-        id="breadth_warm_start",
-        name="Market Breadth Startup Warm-up",
-        replace_existing=True,
-    )
-
-    # Backfill the daily P&L series once, 45s after startup (after the price
-    # backfill at 15s has populated price_snapshots).
-    _scheduler.add_job(
-        backfill_daily_snapshots_job,
-        "date",
-        run_date=datetime.now(timezone.utc) + timedelta(seconds=45),
-        id="backfill_daily_pnl",
-        name="Daily P&L Series Backfill",
-        replace_existing=True,
-    )
-
-    # Price alert evaluation every 5 minutes.
-    _scheduler.add_job(
+    # Price alert evaluation every 5 minutes (default misfire grace, 120 s).
+    scheduler.add_job(
         evaluate_price_alerts,
         "interval",
         minutes=5,
         id="price_alert_evaluation",
         name="Price Alert Evaluation",
-        replace_existing=True,
     )
 
-    _scheduler.start()
-    logger.info("Scheduler started with EOD snapshot, breadth, and backfill jobs")
+    if startup_at is not None:
+        scheduler.add_job(
+            leader_startup,
+            "date",
+            run_date=startup_at,
+            id="leader_startup",
+            name="Leader Startup (backfills, breadth warm-up)",
+            misfire_grace_time=LEADER_STARTUP_MISFIRE_SECONDS,
+        )
 
-
-def shutdown_scheduler() -> None:
-    """Shut down the scheduler gracefully."""
-    global _scheduler
-    if _scheduler and _scheduler.running:
-        _scheduler.shutdown(wait=False)
-        logger.info("Scheduler shut down")
-    _scheduler = None
+    return scheduler
