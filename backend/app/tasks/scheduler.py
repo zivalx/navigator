@@ -14,6 +14,8 @@ from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_ma
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
+from ..services.eod import upsert_eod
+from ..services.sessions import _parse_market_time, classify, is_alertable, trade_date_for
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -34,6 +36,11 @@ NEW_YORK = "America/New_York"
 JOB_DEFAULTS = {"coalesce": True, "max_instances": 1, "misfire_grace_time": 120}
 DAILY_MISFIRE_SECONDS = 3600
 LEADER_STARTUP_MISFIRE_SECONDS = 300
+
+
+def _utcnow() -> datetime:
+    """Current aware-UTC time. Jobs read the clock through this so tests can patch it."""
+    return datetime.now(timezone.utc)
 
 
 async def snapshot_eod_prices() -> None:
@@ -65,23 +72,31 @@ async def snapshot_eod_prices() -> None:
                 quote = await market_service.get_quote(
                     asset.symbol, asset.asset_type.value
                 )
-                # Don't record a stale db_cache fallback as a fresh EOD close —
-                # that would fabricate today's history from an old price.
-                if quote.get("stale"):
+                # Only a live, in-session-fresh quote is an EOD close; stale,
+                # cached or unmonitored quotes are skipped, not errors.
+                now = _utcnow()
+                ok, reason = is_alertable(quote, asset, now)
+                if not ok:
                     logger.info(
-                        "EOD snapshot: skipping %s, only a stale price available",
+                        "EOD snapshot: skipping %s, quote not alertable (%s)",
                         asset.symbol,
+                        reason,
                     )
                     continue
-                snapshot = PriceSnapshot(
-                    id=str(uuid.uuid4()),
-                    asset_id=asset.id,
+                if classify(asset) == "crypto":
+                    ts = now
+                else:
+                    ts = _parse_market_time(quote.get("marketTime")) or now
+                upsert_eod(
+                    db,
+                    asset,
                     price=quote["price"],
                     currency=quote.get("currency", "USD"),
-                    timestamp=datetime.now(timezone.utc),
+                    ts=ts,
+                    trade_date=trade_date_for(quote, asset, now),
                     source="eod_snapshot",
+                    overwrite=True,
                 )
-                db.add(snapshot)
                 db.commit()
                 success_count += 1
             except Exception as e:
@@ -100,7 +115,7 @@ async def snapshot_eod_prices() -> None:
         # After per-asset EOD prices are stored, roll up today's portfolio row.
         try:
             svc = PortfolioService(db, base_currency=Currency.USD)
-            await svc.compute_daily_snapshot(datetime.now(timezone.utc).date())
+            await svc.compute_daily_snapshot(_utcnow().date())
         except Exception as e:
             portfolio_failed = True
             logger.warning("Daily portfolio snapshot failed: %s", redact_secrets(e))

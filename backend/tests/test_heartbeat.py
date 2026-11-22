@@ -16,7 +16,7 @@ from app.tasks import leader
 from app.tasks import scheduler as scheduler_module
 from app.tasks.heartbeat import heartbeat
 from app.tasks.scheduler import build_scheduler
-from tests.factories import make_asset
+from tests.factories import _with_alertable_defaults, make_asset
 
 
 @pytest.fixture()
@@ -160,7 +160,7 @@ async def test_eod_snapshot_raises_when_an_asset_fails(eval_db, monkeypatch):
     async def get_quote(self, symbol, asset_type=None):
         if symbol == "BAD":
             raise RuntimeError("no quote")
-        return {"price": 10.0, "currency": "USD"}
+        return _with_alertable_defaults({"price": 10.0, "currency": "USD"})
 
     async def no_portfolio(self, day):
         return None
@@ -180,7 +180,7 @@ async def test_eod_snapshot_raises_when_portfolio_row_fails(eval_db, monkeypatch
     _hold(eval_db, asset)
 
     async def get_quote(self, symbol, asset_type=None):
-        return {"price": 10.0, "currency": "USD"}
+        return _with_alertable_defaults({"price": 10.0, "currency": "USD"})
 
     async def failing_portfolio(self, day):
         raise RuntimeError("fx missing")
