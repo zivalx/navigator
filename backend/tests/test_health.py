@@ -321,3 +321,97 @@ def test_pg_leader_lock_held_and_statement_timeout():
             assert hs.leader_lock_held(db) is False
             db.execute(text("SET LOCAL statement_timeout = '2s'"))
             assert db.execute(text("SHOW statement_timeout")).scalar() == "2s"
+
+
+def test_budget_cuts_off_remaining_checks(db_session, monkeypatch):
+    healthy(db_session)
+    ticks = iter([0.0, 0.0, 0.0, 100.0] + [100.0] * 100)  # budget (8 s) spent after two checks
+    monkeypatch.setattr(hs, "_monotonic", lambda: next(ticks))
+    checks = deep_checks(db_session, NOW)
+    assert checks["db"].ok and checks["migrations"].ok
+    for k in ("scheduler_leader", "job_quote_refresh", "alert_delivery", "prices_us", "prices_crypto"):
+        assert checks[k] == Check(False, "check failed", checks[k].critical)
+    assert checks["job_breadth_snapshot"].critical is False
+    assert overall_status(checks) == "down"
+
+
+def test_exception_path_keeps_error_text_out_of_body_and_logs(client_deep, db_session, monkeypatch, caplog):
+    healthy(db_session)
+
+    def boom(db, now):
+        raise RuntimeError("ZQXJ postgresql://user:pw@dbhost/x?token=sekrit")
+
+    monkeypatch.setattr(hs, "_check_alert_delivery", boom)
+    resp = client_deep.get("/health/deep")
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["alert_delivery"] == {"ok": False, "detail": "check failed"}
+    assert not any(s in resp.text for s in ("ZQXJ", "sekrit", "dbhost"))
+    assert "sekrit" not in caplog.text and all(r.exc_info is None for r in caplog.records)
+
+
+def test_us_holiday_with_fresh_snapshots_is_ok(db_session):
+    healthy(db_session)
+    thanksgiving = datetime(2026, 11, 26, 15, 0, tzinfo=timezone.utc)
+    snap(db_session, us(db_session), at=thanksgiving - timedelta(minutes=5))
+    hb(db_session, "scheduler_leader", started=thanksgiving - timedelta(hours=1),
+       success=thanksgiving - timedelta(seconds=10))
+    for name in JOB_LIMITS:
+        hb(db_session, name, started=thanksgiving - timedelta(minutes=1), success=thanksgiving - timedelta(minutes=1))
+    assert overall_status(deep_checks(db_session, thanksgiving)) == "ok"
+
+
+def test_funds_only_portfolio_is_ok(db_session):
+    healthy(db_session)
+    asset(db_session, "FUND", atype=AssetType.FUND)
+    checks = deep_checks(db_session, NOW)
+    assert overall_status(checks) == "ok"
+    assert checks["prices_us"].detail == "no monitored assets; 1 not_monitored"
+
+
+def test_tase_closed_while_us_open(db_session):
+    healthy(db_session)
+    friday = datetime(2026, 11, 20, 15, 0, tzinfo=timezone.utc)  # TASE closed 14:00 local, US open
+    snap(db_session, us(db_session), at=friday - timedelta(minutes=5))
+    tase(db_session)
+    hb(db_session, "scheduler_leader", started=friday - timedelta(hours=1), success=friday - timedelta(seconds=10))
+    for name in JOB_LIMITS:
+        hb(db_session, name, started=friday - timedelta(minutes=1), success=friday - timedelta(minutes=1))
+    checks = deep_checks(db_session, friday)
+    assert checks["prices_tase"] == Check(True, "closed")
+    assert checks["prices_us"].ok and overall_status(checks) == "ok"
+
+
+def test_leader_restart_after_outage_is_ok(db_session):
+    hb(db_session, "scheduler_leader", started=NOW - timedelta(seconds=5), success=NOW - timedelta(hours=3))
+    assert deep_checks(db_session, NOW)["scheduler_leader"].ok
+
+
+@requires_pg
+def test_pg_statement_timeout_survives_rollback(db_session):
+    from sqlalchemy.orm import Session
+
+    with scratch_schema() as engine:
+        with Session(engine) as db:
+            hs.arm_statement_timeout(db)
+            assert db.execute(text("SHOW statement_timeout")).scalar() == "2s"
+            hs._rollback(db)
+            assert db.execute(text("SHOW statement_timeout")).scalar() == "2s"
+            hs._guard(lambda: 1 / 0, db)
+            assert db.execute(text("SHOW statement_timeout")).scalar() == "2s"
+
+
+@requires_pg
+def test_pg_non_leader_worker_reads_lock_from_pg_locks():
+    from sqlalchemy.orm import Session
+
+    from app.locks import SCHEDULER_LOCK_KEY, advisory_lock
+
+    with scratch_schema() as engine:
+        JobHeartbeat.__table__.create(engine)
+        with Session(engine) as db:
+            db.add(JobHeartbeat(job_name="scheduler_leader", last_success_at=NOW))
+            db.commit()
+            hbs = {"scheduler_leader": hs._Hb(None, NOW, None)}
+            assert hs._check_leader(db, NOW, hbs) == Check(False, "no leader lock held")
+            with advisory_lock(engine, SCHEDULER_LOCK_KEY):  # another process holds it
+                assert hs._check_leader(db, NOW, hbs).ok

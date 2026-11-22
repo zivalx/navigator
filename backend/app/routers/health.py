@@ -2,7 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -22,14 +21,7 @@ async def health():
 @router.get("/health/deep")
 def health_deep(db: Session = Depends(get_db)):
     """Sync `def` so FastAPI runs it in the threadpool. 503 only for `down`."""
-    try:
-        if db.get_bind().dialect.name == "postgresql":
-            db.execute(text("SET LOCAL statement_timeout = '2s'"))
-    except Exception:  # noqa: BLE001  (deep_checks reports the db failure)
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+    health_service.arm_statement_timeout(db)
     checks = health_service.deep_checks(db, health_service._utcnow())
     status = health_service.overall_status(checks)
     body = {

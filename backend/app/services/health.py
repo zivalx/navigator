@@ -5,7 +5,9 @@ error text or secrets. Check names are snake_case (the ops watchdog drops any
 name outside `[a-z0-9_.:-]`).
 """
 import logging
+import time
 from dataclasses import dataclass
+from typing import NamedTuple
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal, Optional
 
@@ -18,6 +20,7 @@ from ..models.asset import Asset
 from ..models.job_heartbeat import JobHeartbeat
 from ..models.price import PriceSnapshot
 from ..schema_version import db_revision, head_revision
+from .log_redaction import redact_secrets
 from .portfolio import _ensure_aware
 from .sessions import (
     ALERTABLE_SOURCES,
@@ -55,6 +58,19 @@ PRICE_FRESH_FOR = timedelta(minutes=30)
 OPEN_GRACE = timedelta(minutes=15)
 FRESH_SOURCES = frozenset().union(*ALERTABLE_SOURCES.values())
 SKIPPED = "skipped: db unreachable"
+STATEMENT_TIMEOUT = "2s"
+DEEP_BUDGET_SECONDS = 8.0  # inside the watchdog's 10 s deep timeout
+
+
+class _Hb(NamedTuple):
+    """Heartbeat times detached from the session (a rollback expires ORM rows)."""
+    last_started_at: Optional[datetime]
+    last_success_at: Optional[datetime]
+    last_error_at: Optional[datetime]
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _utcnow() -> datetime:
@@ -87,7 +103,7 @@ def leader_lock_held(db: Session) -> bool:
     return row is not None
 
 
-def _reference(hb: Optional[JobHeartbeat], leader_hb: Optional[JobHeartbeat]):
+def _reference(hb: Optional[_Hb], leader_hb: Optional[_Hb]):
     """(reference time, is_success): last success, else the leader's last start."""
     if hb is not None and hb.last_success_at is not None:
         return _ensure_aware(hb.last_success_at), True
@@ -96,11 +112,12 @@ def _reference(hb: Optional[JobHeartbeat], leader_hb: Optional[JobHeartbeat]):
     return None, False
 
 
-def _check_leader(db: Session, now: datetime, hbs: dict[str, JobHeartbeat]) -> Check:
+def _check_leader(db: Session, now: datetime, hbs: dict[str, _Hb]) -> Check:
     if not leader_lock_held(db):
         return Check(False, "no leader lock held")
     hb = hbs.get(LEADER_JOB)
-    ref, _ = _reference(hb, hb)
+    stamps = [_ensure_aware(t) for t in (hb.last_started_at, hb.last_success_at) if t] if hb else []
+    ref = max(stamps) if stamps else None  # a restart stamps last_started_at, not last_success_at
     if ref is None:
         return Check(False, "no leader heartbeat")
     age = now - ref
@@ -108,7 +125,7 @@ def _check_leader(db: Session, now: datetime, hbs: dict[str, JobHeartbeat]) -> C
     return Check(age <= LEADER_LIMIT, detail)
 
 
-def _check_job(name: str, now: datetime, hbs: dict[str, JobHeartbeat]) -> Check:
+def _check_job(name: str, now: datetime, hbs: dict[str, _Hb]) -> Check:
     limit, critical = JOB_LIMITS[name]
     hb = hbs.get(name)
     ref, is_success = _reference(hb, hbs.get(LEADER_JOB))
@@ -189,6 +206,8 @@ def _freshness(exchange: str, assets: list[Asset], fresh: dict[str, set[str]]) -
             missing += 1
         elif exchange == "crypto" and "coingecko" not in seen:
             fallback_only += 1
+    if monitored == 0:
+        return Check(True, "no monitored assets" + (f"; {not_monitored} not_monitored" if not_monitored else ""))
     mins = int(PRICE_FRESH_FOR.total_seconds() // 60)
     suffix = f"; {not_monitored} not_monitored" if not_monitored else ""
     base = f"{missing} of {monitored} watched assets without a fresh price for {mins}+ min"
@@ -211,72 +230,113 @@ def _check_migrations(db: Session) -> Check:
     return Check(False, "database revision differs from code head")
 
 
-def _guard(fn: Callable[[], Check], db: Session, critical: bool = True) -> Check:
+def _rollback(db: Session) -> None:
+    """Roll back and re-arm the statement timeout (SET LOCAL dies with the
+    transaction, so every rollback would otherwise leave later checks unbounded)."""
     try:
-        return fn()
-    except Exception:  # noqa: BLE001  (no error text in the body)
-        logger.exception("health check failed")
+        db.rollback()
+    except Exception:  # noqa: BLE001
+        return
+    arm_statement_timeout(db)
+
+
+def arm_statement_timeout(db: Session) -> None:
+    """`SET LOCAL statement_timeout` for the current transaction (Postgres only)."""
+    try:
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(text(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'"))
+    except Exception:  # noqa: BLE001  (the db check reports an unreachable database)
         try:
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _log_failure(what: str, exc: Exception) -> None:
+    # No traceback and no raw text: driver errors can carry host, user or DSN.
+    logger.error("health: %s: %s", what, redact_secrets(exc))
+
+
+def _guard(fn: Callable[[], Check], db: Session, critical: bool = True) -> Check:
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001  (no error text in the body)
+        _log_failure("check failed", e)
+        _rollback(db)
         return Check(False, "check failed", critical)
 
 
-def deep_checks(db: Session, now: datetime) -> dict[str, Check]:
+class _Budget:
+    def __init__(self, seconds: float):
+        self.deadline = _monotonic() + seconds
+
+    def spent(self) -> bool:
+        return _monotonic() >= self.deadline
+
+
+def deep_checks(db: Session, now: datetime, budget_seconds: float = DEEP_BUDGET_SECONDS) -> dict[str, Check]:
     keys = (
         ["db", "migrations", "scheduler_leader"]
         + [f"job_{n}" for n in JOB_LIMITS]
         + ["alert_delivery", "prices_us", "prices_tase", "prices_crypto"]
     )
+    critical_of = {f"job_{n}": c for n, (_, c) in JOB_LIMITS.items()}
+    budget = _Budget(budget_seconds)
+
+    def failed(detail: str) -> dict[str, Check]:
+        return {k: Check(False, detail, critical_of.get(k, True)) for k in keys}
+
     try:
         db.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001
-        logger.warning("health: database unreachable")
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        out = {k: Check(False, SKIPPED) for k in keys}
+    except Exception as e:  # noqa: BLE001
+        _log_failure("database unreachable", e)
+        _rollback(db)
+        out = failed(SKIPPED)
         out["db"] = Check(False, "unreachable")
-        for name, (_, critical) in JOB_LIMITS.items():
-            out[f"job_{name}"] = Check(False, SKIPPED, critical)
         return out
 
     out: dict[str, Check] = {"db": Check(True, "reachable")}
-    out["migrations"] = _guard(lambda: _check_migrations(db), db)
 
-    hbs: dict[str, JobHeartbeat] = {}
-    hb_ok = True
-    try:
-        hbs = {h.job_name: h for h in db.query(JobHeartbeat).all()}
-    except Exception:  # noqa: BLE001
-        logger.exception("health: heartbeat read failed")
-        hb_ok = False
+    def step(key: str, fn: Callable[[], Check]) -> None:
+        if budget.spent():
+            out[key] = Check(False, "check failed", critical_of.get(key, True))
+        else:
+            out[key] = _guard(fn, db, critical_of.get(key, True))
+
+    step("migrations", lambda: _check_migrations(db))
+
+    hbs: Optional[dict[str, _Hb]] = None
+    if not budget.spent():
         try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-    if hb_ok:
-        out["scheduler_leader"] = _guard(lambda: _check_leader(db, now, hbs), db)
-        for name, (_, critical) in JOB_LIMITS.items():
-            out[f"job_{name}"] = _guard(lambda n=name: _check_job(n, now, hbs), db, critical)
+            hbs = {
+                h.job_name: _Hb(h.last_started_at, h.last_success_at, h.last_error_at)
+                for h in db.query(JobHeartbeat).all()
+            }
+        except Exception as e:  # noqa: BLE001
+            _log_failure("heartbeat read failed", e)
+            _rollback(db)
+    if hbs is None:
+        for k in ["scheduler_leader"] + [f"job_{n}" for n in JOB_LIMITS]:
+            out[k] = Check(False, "check failed", critical_of.get(k, True))
     else:
-        out["scheduler_leader"] = Check(False, "check failed")
-        for name, (_, critical) in JOB_LIMITS.items():
-            out[f"job_{name}"] = Check(False, "check failed", critical)
+        step("scheduler_leader", lambda: _check_leader(db, now, hbs))
+        for name in JOB_LIMITS:
+            step(f"job_{name}", lambda n=name: _check_job(n, now, hbs))
 
-    out["alert_delivery"] = _guard(lambda: _check_alert_delivery(db, now), db)
-    try:
-        out.update(_price_checks(db, now))
-    except Exception:  # noqa: BLE001
-        logger.exception("health: price checks failed")
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        for k in ("prices_us", "prices_tase", "prices_crypto"):
+    step("alert_delivery", lambda: _check_alert_delivery(db, now))
+
+    price_keys = ("prices_us", "prices_tase", "prices_crypto")
+    if budget.spent():
+        for k in price_keys:
             out[k] = Check(False, "check failed")
+    else:
+        try:
+            out.update(_price_checks(db, now))
+        except Exception as e:  # noqa: BLE001
+            _log_failure("price checks failed", e)
+            _rollback(db)
+            for k in price_keys:
+                out[k] = Check(False, "check failed")
     return {k: out[k] for k in keys}
 
 
