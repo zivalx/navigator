@@ -19,6 +19,7 @@ from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
 from ..services.log_redaction import redact_secrets
 from ..services.portfolio import PortfolioService
+from .heartbeat import heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ async def snapshot_eod_prices() -> None:
         market_service = MarketDataService(db)
         success_count = 0
         error_count = 0
+        portfolio_failed = False
 
         for asset_id in asset_ids:
             asset = db.query(Asset).filter(Asset.id == asset_id).first()
@@ -86,7 +88,7 @@ async def snapshot_eod_prices() -> None:
                 db.rollback()
                 error_count += 1
                 logger.warning(
-                    "EOD snapshot failed for %s: %s", asset.symbol, e
+                    "EOD snapshot failed for %s: %s", asset.symbol, redact_secrets(e)
                 )
 
         logger.info(
@@ -100,9 +102,15 @@ async def snapshot_eod_prices() -> None:
             svc = PortfolioService(db, base_currency=Currency.USD)
             await svc.compute_daily_snapshot(datetime.now(timezone.utc).date())
         except Exception as e:
-            logger.warning("Daily portfolio snapshot failed: %s", e)
-    except Exception as e:
-        logger.error("EOD snapshot job error: %s", e)
+            portfolio_failed = True
+            logger.warning("Daily portfolio snapshot failed: %s", redact_secrets(e))
+
+        # Every asset was attempted; now fail the job so its heartbeat shows it.
+        if error_count or portfolio_failed:
+            message = f"EOD snapshot: {error_count} asset(s) failed"
+            if portfolio_failed:
+                message += ", daily portfolio row failed"
+            raise RuntimeError(message)
     finally:
         db.close()
 
@@ -282,9 +290,9 @@ async def evaluate_price_alerts() -> None:
         try:
             quotes = await market_service.get_quotes(symbols)
         except Exception as e:
-            logger.error("Price alert evaluation: quote fetch failed: %s", e)
-            await notify_triggered_alerts(db)
-            return
+            logger.error("Price alert evaluation: quote fetch failed: %s", redact_secrets(e))
+            await notify_triggered_alerts(db)  # retries still go out
+            raise
 
         paused_symbols: set[str] = set()
 
@@ -344,9 +352,9 @@ async def evaluate_price_alerts() -> None:
             )
 
         await notify_triggered_alerts(db)
-    except Exception as e:
+    except Exception:
         db.rollback()
-        logger.error("Price alert evaluation job error: %s", e)
+        raise  # the heartbeat wrapper logs and records it
     finally:
         db.close()
 
@@ -440,7 +448,7 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
 
     # Daily EOD snapshot at 16:30 New York (after market close)
     scheduler.add_job(
-        snapshot_eod_prices,
+        heartbeat("eod_snapshot")(snapshot_eod_prices),
         "cron",
         hour=16,
         minute=30,
@@ -453,7 +461,7 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
     # Daily market breadth computation (S5FI/S5TH) at 17:00 New York,
     # shortly after the EOD snapshot.
     scheduler.add_job(
-        breadth_service.compute_and_store_breadth,
+        heartbeat("breadth_snapshot")(breadth_service.compute_and_store_breadth),
         "cron",
         hour=17,
         minute=0,
@@ -465,7 +473,7 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
 
     # Price alert evaluation every 5 minutes (default misfire grace, 120 s).
     scheduler.add_job(
-        evaluate_price_alerts,
+        heartbeat("price_alert_evaluation")(evaluate_price_alerts),
         "interval",
         minutes=5,
         id="price_alert_evaluation",
@@ -474,7 +482,7 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
 
     if startup_at is not None:
         scheduler.add_job(
-            leader_startup,
+            heartbeat("leader_startup")(leader_startup),
             "date",
             run_date=startup_at,
             id="leader_startup",

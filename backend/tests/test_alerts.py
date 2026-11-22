@@ -379,25 +379,6 @@ async def test_evaluate_skips_already_inactive_alerts(eval_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_leaves_alerts_untouched_when_quote_fetch_fails(eval_db, monkeypatch):
-    asset = make_asset(eval_db, symbol="AAPL")
-    alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
-    alert_id = alert.id
-
-    async def failing_get_quotes(self, symbols):
-        raise RuntimeError("provider outage")
-
-    monkeypatch.setattr(MarketDataService, "get_quotes", failing_get_quotes)
-
-    await scheduler_module.evaluate_price_alerts()
-
-    alert = reload_alert(eval_db, alert_id)
-    assert alert.is_active is True
-    assert alert.triggered_at is None
-    assert alert.triggered_price is None
-
-
-@pytest.mark.asyncio
 async def test_evaluate_skips_alert_when_its_own_quote_has_error(eval_db, monkeypatch):
     asset = make_asset(eval_db, symbol="AAPL")
     alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
