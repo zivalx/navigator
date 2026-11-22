@@ -14,8 +14,8 @@ COPY requirements.txt .
 RUN --mount=type=secret,id=corp_ca,required=false \
     if [ -s /run/secrets/corp_ca ]; then \
       trap 'rm -f /tmp/ca-bundle.pem' EXIT; \
-      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/corp_ca > /tmp/ca-bundle.pem; \
-      export PIP_CERT=/tmp/ca-bundle.pem; \
+      cat /etc/ssl/certs/ca-certificates.crt /run/secrets/corp_ca > /tmp/ca-bundle.pem \
+        && export PIP_CERT=/tmp/ca-bundle.pem || exit 1; \
     fi; \
     pip install --no-cache-dir -r requirements.txt gunicorn
 

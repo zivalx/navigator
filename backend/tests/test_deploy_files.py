@@ -56,11 +56,49 @@ def test_download_runs_mount_optional_corp_ca_secret():
         assert "/run/secrets/corp_ca" in head, path
 
 
+def _joined_instructions(path):
+    """Instructions with backslash-continuation lines joined into one logical line."""
+    out, cur = [], ""
+    for ln in _instructions(path):
+        if cur:
+            cur += " " + ln.strip()
+        else:
+            cur = ln
+        if cur.endswith("\\"):
+            cur = cur[:-1].rstrip()
+            continue
+        out.append(cur)
+        cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+def test_pip_blocks_build_bundle_from_system_roots_and_clean_up():
+    for path in DOCKERFILES[:2]:
+        text = path.read_text()
+        assert "ca-certificates.crt" in text, path
+        assert "rm -f /tmp/ca-bundle.pem" in text, path
+        assert "|| exit 1" in text, path
+
+
+def test_frontend_npm_uses_node_extra_ca_certs():
+    text = (ROOT / "frontend" / "Dockerfile").read_text()
+    assert "NODE_EXTRA_CA_CERTS=/run/secrets/corp_ca" in text
+
+
+def test_no_system_trust_store_modification():
+    for path in DOCKERFILES:
+        text = path.read_text()
+        assert "update-ca-certificates" not in text, path
+        assert "/usr/local/share/ca-certificates" not in text, path
+
+
 def test_no_cert_copied_or_in_env():
     import re
 
     for path in DOCKERFILES:
-        for ln in _instructions(path):
+        for ln in _joined_instructions(path):
             if re.match(r"\s*(COPY|ADD)\b", ln):
                 assert not re.search(r"\.(pem|crt|cer)\b|corp_ca", ln), (path, ln)
             if re.match(r"\s*(ENV|ARG)\b", ln):
