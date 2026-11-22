@@ -65,14 +65,10 @@ async def root():
     }
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
 # Import and include routers
-from .routers import assets, portfolio, watchlist, markets, news, alerts, export
+from .routers import assets, portfolio, watchlist, markets, news, alerts, export, health
 
+app.include_router(health.router)
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
