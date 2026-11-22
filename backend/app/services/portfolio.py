@@ -495,7 +495,7 @@ class PortfolioService:
                 monthly_pnl_percent = (monthly_delta / monthly_nav) * 100
 
         except Exception as e:
-            logger.warning("Error calculating P&L from snapshots: %s", e)
+            logger.warning("Error calculating P&L from snapshots: %s", redact_secrets(e))
 
         return PortfolioSummary(
             totalNav=total_nav,

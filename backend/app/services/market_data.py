@@ -186,7 +186,7 @@ class MarketDataService:
             self.db.commit()
         except Exception as exc:
             # Don't fail if we can't store - just skip
-            logger.warning("could not store price snapshot for %s: %s", symbol, exc)
+            logger.warning("could not store price snapshot for %s: %s", symbol, redact_secrets(exc))
             self.db.rollback()
 
     async def _fetch_and_cache_movers(self) -> None:

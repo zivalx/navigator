@@ -99,7 +99,10 @@ class PgAdvisoryLock:
     def __init__(self, database_url: str, key: int = SCHEDULER_LOCK_KEY):
         self._key = int(key)
         self._engine = create_engine(
-            database_url, poolclass=NullPool, connect_args=_lock_connect_args(database_url)
+            database_url,
+            poolclass=NullPool,
+            hide_parameters=True,
+            connect_args=_lock_connect_args(database_url),
         )
         self._conn: Connection | None = None
         self._pid: int | None = None

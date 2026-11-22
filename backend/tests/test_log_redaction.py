@@ -128,3 +128,56 @@ async def test_price_unavailable_log_redacts_keys(db_session, monkeypatch, caplo
     assert h.unavailable_reason == "price_unavailable"
     logged = " ".join(r.getMessage() for r in caplog.records)
     assert "price_unavailable" in logged and "sekrit123" not in logged
+
+
+def test_strips_url_userinfo():
+    text = redact_secrets("could not connect to postgresql://navigator:hunter2@db:5432/navigator")
+    assert "hunter2" not in text and "navigator:" not in text
+    assert "postgresql://***@db:5432/navigator" in text
+
+
+def test_strips_sqlalchemy_parameters_segment():
+    text = redact_secrets(
+        "(sqlite3.IntegrityError) UNIQUE failed\n"
+        "[SQL: INSERT INTO portfolio_snapshots (nav) VALUES (?)]\n"
+        "[parameters: ('x', 12345.678, 9.99)]\n"
+        "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
+    )
+    assert "12345.678" not in text and "9.99" not in text
+    assert "[SQL: INSERT INTO portfolio_snapshots" in text and "Background on this error" in text
+
+
+def test_strips_truncated_parameters_segment():
+    assert "777.5" not in redact_secrets("boom [parameters: (1, 777.5, 'abc'")
+
+
+def test_integrity_error_log_has_no_parameter_values(db_session, caplog):
+    import uuid
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.portfolio_snapshot import PortfolioSnapshot
+
+    def row():
+        return PortfolioSnapshot(id=str(uuid.uuid4()), date=date(2026, 1, 2), nav=123456.789, net_flow=424242.5)
+
+    db_session.add(row())
+    db_session.commit()
+    db_session.add(row())
+    with pytest.raises(IntegrityError) as exc:
+        db_session.commit()
+    db_session.rollback()
+    assert "123456.789" in str(exc.value)  # an unhidden engine does leak: the premise
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger("t").warning("write failed: %s", redact_secrets(exc.value))
+    assert "123456.789" not in caplog.text and "424242.5" not in caplog.text
+
+
+def test_every_engine_hides_parameters():
+    from app.database import engine
+    from app.tasks.leader import PgAdvisoryLock
+
+    assert engine.hide_parameters is True
+    lock = PgAdvisoryLock("postgresql://u:p@127.0.0.1:1/x")
+    assert lock._engine.hide_parameters is True

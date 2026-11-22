@@ -35,7 +35,7 @@ def run_migrations_online() -> None:
     engine = config.attributes.get("engine")
     owns_engine = engine is None
     if owns_engine:
-        engine = create_engine(settings.database_url, poolclass=NullPool)
+        engine = create_engine(settings.database_url, poolclass=NullPool, hide_parameters=True)
     take_lock = not config.attributes.get("lock_held", False)
     try:
         with engine.connect() as connection:

@@ -146,7 +146,7 @@ async def backfill_daily_snapshots_job() -> None:
         written = await svc.backfill_daily_snapshots()
         logger.info("Daily P&L backfill wrote %d rows", written)
     except Exception as e:
-        logger.error("Daily P&L backfill error: %s", e)
+        logger.error("Daily P&L backfill error: %s", redact_secrets(e))
     finally:
         db.close()
 

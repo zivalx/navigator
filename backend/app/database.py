@@ -8,6 +8,8 @@ from .schema_version import db_revision, head_revision
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
+    # Statement parameters (costs, quantities) must never reach an error message.
+    hide_parameters=True,
     echo=settings.app_env == "development",
 )
 
