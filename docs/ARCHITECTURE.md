@@ -47,18 +47,26 @@ Internet :443/:80
       │
       ▼
 ┌───────────────────────────────────────────────────────────┐
-│ nginx:1.25-alpine (SSL termination, rate limiting, gzip)   │
-│  - :80  → 301 redirect to https (except /.well-known/*)   │
-│  - :443 → TLS via Let's Encrypt (certbot shared volume)    │
-│  - /api/*  → proxy_pass http://api:7000                   │
-│  - /health → proxy_pass http://api:7000 (no rate limit)   │
-│  - /*      → static SPA files from shared "frontend_build"│
+│ edge Caddy (zivalx-ops, outside this repo)                 │
+│  - terminates TLS (automatic certificates)                 │
+│  - basic auth (Navigator has no auth of its own)           │
+│  - reverse proxies to navigator-nginx:80                   │
+└───────────────────────────┬───────────────────────────────┘
+                            │ external docker network `edge`
+                            ▼
+┌───────────────────────────────────────────────────────────┐
+│ navigator-nginx (nginx:1.25-alpine) - joins `edge`, NO     │
+│ published ports                                            │
+│  - plain HTTP :80, rate limiting, gzip                     │
+│  - /api/*  → proxy_pass http://navigator-api:7000          │
+│  - /health, /health/deep → navigator-api (no rate limit)   │
+│  - /*      → static SPA files from shared "frontend_build" │
 │              volume, try_files → index.html                │
 └───────┬───────────────────────────────┬────────────────────┘
         │                               │
         ▼                               ▼
 ┌────────────────────┐         ┌────────────────────────┐
-│ frontend (build     │         │ api                     │
+│ frontend (build     │         │ navigator-api           │
 │ container, runs      │         │ Dockerfile.prod:        │
 │ once, exits)         │         │ gunicorn + 2 uvicorn     │
 │ outputs static build │         │ workers, :7000           │
@@ -67,20 +75,19 @@ Internet :443/:80
                                           ▼        ▼
                                ┌──────────────┐ ┌──────────────┐
                                │ postgres:15   │ │ redis:7       │
-                               │ (internal net)│ │ (password-    │
-                               │               │ │ protected,    │
-                               │               │ │ internal net) │
+                               │ (navigator-net│ │ (password-    │
+                               │  only)        │ │ protected,    │
+                               │               │ │ navigator-net)│
                                └──────────────┘ └──────────────┘
-
-certbot container shares the /etc/letsencrypt and webroot volumes with
-nginx and renews certs on a 12h sleep loop (docker-compose.prod.yml).
 ```
+
+There is no certbot and no TLS inside this repo: certificates and basic auth belong to the edge Caddy.
 
 Notes on production topology:
 - `postgres` and `redis` publish **no host ports** in prod compose — only reachable from other containers on the `navigator-net` bridge network. In dev compose, `db`/`redis` do publish `5432`/`6379` to the host.
 - `redis` in prod requires a password (`--requirepass ${REDIS_PASSWORD}`); dev Redis has no password.
 - The `api` container's healthcheck hits `/health` (`backend/app/routers/health.py`; shallow, no DB). `GET /health/deep` returns `{"status","checks"}` (200 for ok/degraded, 503 for down) and is polled by the ops watchdog.
-- nginx config lives at `nginx/nginx.conf` (main config, not read in detail here) and `nginx/conf.d/default.conf.template`, which is `envsubst`'d for `${DOMAIN}` at container start (see the nginx service `command:` in `docker-compose.prod.yml`).
+- nginx config lives at `nginx/nginx.conf` (main config) and `nginx/conf.d/default.conf`, mounted read-only. It trusts `X-Forwarded-For` only from the edge network (`set_real_ip_from 10.250.0.0/24`) and proxies to the container name `navigator-api` through Docker DNS (`resolver 127.0.0.11`, variable `proxy_pass`).
 
 ## 2. Data Model
 
@@ -264,7 +271,7 @@ An `AsyncIOScheduler` (APScheduler) is built by `build_scheduler()` and started 
 3. **`eod_snapshot`** — cron `16:30` `America/New_York`, daily. Runs `snapshot_eod_prices()`: one EOD `PriceSnapshot` (`source="eod_snapshot"`) per held asset, stamped with the quote's market time and its `trade_date`. EOD rows are unique per asset per trade date (`uq_price_snapshots_eod`). Per-asset failures are logged and the job continues.
 4. **`breadth_snapshot`** — cron `17:00` `America/New_York`, daily. Runs `services/breadth.py:compute_and_store_breadth()` — computes the % of S&P 500 constituents above their 50-day/200-day SMAs and stores the values in Redis **without expiry** (overwritten daily).
 5. **`eod_catchup`** — cron `17:15` `America/New_York`, daily, and also run by `leader_startup`. Fills missed EOD days from Yahoo daily bars (`source="eod_backfill"`, stamped at the session close, never overwriting an existing row), then the portfolio snapshot rows they enable. This replaces the old `backfill_historical` job.
-6. **`leader_startup`** — one-shot `date` job 15 s after the process becomes leader. Runs, in order, `eod_catchup`, `backfill_daily_pnl` (only if `portfolio_snapshots` is empty) and `breadth_warm_start` (`breadth.ensure_breadth_warm()`, a no-op unless the Redis cache is cold).
+6. **`leader_startup`** — one-shot `date` job 15 s after the process becomes leader. Runs, in order, `eod_snapshot` (only when its 16:30 slot was missed and the US session is closed), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty) and `breadth_warm_start` (`breadth.ensure_breadth_warm()`, a no-op unless the Redis cache is cold).
 
 The leader loop itself heartbeats as `scheduler_leader` every 30 s.
 

@@ -13,9 +13,9 @@ backend/app/
                # alphavantage, cnn, alternative_me)
   tasks/       # APScheduler jobs (scheduler.py), leader election (leader.py), heartbeats (heartbeat.py)
   locks.py, migrate.py, legacy_schema.py   # advisory-lock keys, `python -m app.migrate`, legacy-DB adoption
-backend/alembic/versions/   # schema revisions (Alembic owns the Postgres schema)
   models/ schemas/  # SQLAlchemy models, Pydantic schemas
   config.py    # Settings (env-driven), database.py, cache.py, main.py
+backend/alembic/versions/   # schema revisions (Alembic owns the Postgres schema)
 backend/scripts/   # one-off ops scripts (audit_asset_currencies.py)
 backend/seed.py, seed_watchlists.py   # sample data
 frontend/src/
@@ -104,7 +104,8 @@ for defaults.
   starting the scheduler on acquire and stopping it on loss. Failover bounds: the leader
   demotes within about 50 s of losing its connection (30 s interval + 2 x 10 s call
   timeout, `tcp_user_timeout` 20 s) and the server frees the lock at about 60 s (session
-  keepalives), so the old leader always stops first. Non-Postgres URLs use an always-leader
+  keepalives), so the old leader always stops first. In-flight jobs can outlive demotion;
+  idempotency (the EOD unique index, `SKIP LOCKED` on notifications) covers it. Non-Postgres URLs use an always-leader
   lock. Lock key registry (identical across the platform, never reuse): `7400417` Navigator
   init/migrate, `7400418` Navigator scheduler leader, `7400419` and `7400420` trender (see
   `app/locks.py`).
@@ -117,10 +118,10 @@ for defaults.
   | `scheduler_leader` | every 30 s (leader loop, not a job) | leader heartbeat |
   | `quote_refresh` | every 5 min | quotes for held/alerted assets whose exchange is in session; writes the price snapshots that prove freshness |
   | `price_alert_evaluation` | every 5 min | evaluates active alerts; sends Telegram notifications |
-  | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset |
+  | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset; today's portfolio row only when every held, priceable, in-session asset has today's row |
   | `breadth_snapshot` | 17:00 America/New_York, daily | S5FI/S5TH into Redis (no expiry) |
-  | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting; then portfolio rows (skipped while `portfolio_snapshots` is empty) |
-  | `leader_startup` | once, 15 s after becoming leader | runs `eod_catchup`, `backfill_daily_pnl` (only if `portfolio_snapshots` is empty), `breadth_warm_start` in order |
+  | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting (window: last row - 5 d, at least 30 d back, 183 d for new holdings; a 404 or `chart.error` is "no data", not a failure); then portfolio rows (skipped while `portfolio_snapshots` is empty), and earlier missing portfolio days insert-only |
+  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty), `breadth_warm_start` in order |
 
   `backfill_historical` no longer exists: `eod_catchup` and `leader_startup` replace it.
 - **EOD rules** (`services/eod.py`, `services/sessions.py`): EOD eligibility is separate
@@ -129,7 +130,11 @@ for defaults.
   a live source and a fresh market time. There is one EOD row per asset per trade day
   (partial unique index `uq_price_snapshots_eod` on `(asset_id, trade_date)`); reruns keep
   the earlier timestamp. `eod_backfill` rows are stamped at the session close (crypto 23:59:59
-  UTC). Funds (no live source) report `not_monitored` and are never alertable. Holidays are not modelled; `old_market_time` is what they look like.
+  UTC). Funds (no live source) report `not_monitored` and are never alertable. Holidays are
+  not modelled; `old_market_time` is what they look like. `old_market_time` and `not_monitored`
+  are neutral (logged at INFO, outside the failure rule). Known gap: a feed that returns a
+  frozen `regularMarketTime` yields `old_market_time` (neutral) and pauses alerts silently;
+  the freshness check does not catch it.
 - **Health** (`routers/health.py`, `services/health.py`): `GET /health` is shallow
   liveness (no DB). `GET /health/deep` returns `{"status": "ok|degraded|down", "checks":
   {name: {"ok", "detail"}}}` covering db, migrations, scheduler leader, each job heartbeat,

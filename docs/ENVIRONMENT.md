@@ -37,8 +37,6 @@ These aren't read by `config.py` directly but are required by the compose files 
 |---|---|---|
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `docker-compose.prod.yml` | Postgres container credentials; also interpolated into the `DATABASE_URL` the compose file passes to `api`. |
 | `REDIS_PASSWORD` | `docker-compose.prod.yml` | Redis `--requirepass`; interpolated into `REDIS_URL` for `api`. Dev compose (`backend/docker-compose.yml`) has no Redis password. |
-| `DOMAIN` | `docker-compose.prod.yml`, `nginx/conf.d/default.conf.template` | `envsubst`'d into the nginx server config for TLS server_name / cert paths. |
-| `CERTBOT_EMAIL` | `.env.prod.example` (referenced by `scripts/init-letsencrypt.sh`, not read in detail here) | Let's Encrypt registration contact. |
 
 ## Discrepancies between the two `.env*.example` files and `config.py`
 

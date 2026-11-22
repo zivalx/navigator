@@ -69,7 +69,6 @@ A production-ready compose file (separate from the dev one) with:
 ### 1.4 nginx Configuration
 
 - [ ] Reverse proxy: `/` serves frontend static files, `/api` proxies to backend:8000
-- [ ] SSL with Let's Encrypt (certbot or Cloudflare origin certs)
 - [ ] Gzip compression
 - [ ] Security headers (X-Frame-Options, CSP, HSTS)
 - [ ] Rate limiting at nginx level
