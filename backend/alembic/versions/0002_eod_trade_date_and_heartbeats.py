@@ -5,9 +5,11 @@ taken at 16:30 ET, eod_backfill rows carry the bar timestamp (on the session
 date in UTC). Weekend eod_snapshot rows of US and TASE listings (Mon-Fri
 exchanges) move back to Friday; their price equals Friday's close. Then one
 row per (asset_id, trade_date) is kept: the latest row's values, stamped with
-the group's earliest timestamp, so every PortfolioService._latest_snapshot
-read that resolved to that trade day's close still does (a Saturday row
-remapped to Friday must not hide Friday's close until Saturday evening).
+the group's earliest eod_snapshot timestamp (else the group's earliest), so
+every PortfolioService._latest_snapshot read that resolved to that trade day's
+close still does. A Saturday row remapped to Friday must not hide Friday's
+close until Saturday evening, and a close must not move back to an
+eod_backfill bar's session-open time, behind that day's intraday quotes.
 The deleted rows are not restored by downgrade().
 
 Revision ID: 0002
@@ -61,8 +63,10 @@ def upgrade() -> None:
         "WITH d AS ("
         "  SELECT id, row_number() OVER (PARTITION BY asset_id, trade_date"
         "                                ORDER BY timestamp DESC, id DESC) AS rn,"
-        "         min(timestamp) OVER (PARTITION BY asset_id, trade_date) AS first_ts"
-        "  FROM price_snapshots WHERE trade_date IS NOT NULL),"
+        "         coalesce(min(timestamp) FILTER (WHERE source = 'eod_snapshot') OVER w,"
+        "                  min(timestamp) OVER w) AS first_ts"
+        "  FROM price_snapshots WHERE trade_date IS NOT NULL"
+        "  WINDOW w AS (PARTITION BY asset_id, trade_date)),"
         " restamped AS ("
         "  UPDATE price_snapshots p SET timestamp = d.first_ts FROM d"
         "  WHERE p.id = d.id AND d.rn = 1 AND p.timestamp <> d.first_ts),"

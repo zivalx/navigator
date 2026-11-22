@@ -237,6 +237,7 @@ _SEED = [
     ("us-tue-1635", _US, "2026-11-17 21:35", "eod_snapshot", date(2026, 11, 17)),
     ("us-wed-bar", _US, "2026-11-18 14:30", "eod_backfill", date(2026, 11, 18)),
     ("us-wed-eod", _US, "2026-11-18 21:30", "eod_snapshot", date(2026, 11, 18)),
+    ("us-wed-q", _US, "2026-11-18 18:00", "yahoo", None),
     ("us-fri", _US, "2026-11-20 21:30", "eod_snapshot", date(2026, 11, 20)),
     ("us-sat", _US, "2026-11-21 21:30", "eod_snapshot", date(2026, 11, 20)),
     ("ta-sun", _TA, "2026-11-22 21:30", "eod_snapshot", date(2026, 11, 20)),
@@ -279,13 +280,19 @@ def test_pg_0002_dedupe(caplog):
         assert "0002: removed 5 duplicate EOD price rows" in caplog.messages
 
         # Expected survivor per key: the latest row (ids sort with it here), with
-        # its own price, stamped with the group's earliest timestamp.
+        # its own price, stamped with the group's earliest eod_snapshot timestamp
+        # (else the group's earliest).
         groups = {}
-        for n, (id_, asset, ts, _, td) in enumerate(_SEED):
+        for n, (id_, asset, ts, source, td) in enumerate(_SEED):
             if td is not None:
-                groups.setdefault((asset, td), []).append((ts, id_, 50.0 + n))
+                groups.setdefault((asset, td), []).append((ts, id_, 50.0 + n, source))
+
+        def first_ts(rows):
+            snaps = [r[0] for r in rows if r[3] == "eod_snapshot"]
+            return _utc(min(snaps or [r[0] for r in rows]))
+
         expected = sorted(
-            (a, td, max(rows)[1], max(rows)[2], _utc(min(rows)[0])) for (a, td), rows in groups.items()
+            (a, td, max(rows)[1], max(rows)[2], first_ts(rows)) for (a, td), rows in groups.items()
         )
         with eng.connect() as c:
             kept = c.exec_driver_sql(
@@ -300,7 +307,7 @@ def test_pg_0002_dedupe(caplog):
             ).scalar() == 0
             quotes = c.exec_driver_sql(
                 "SELECT trade_date FROM price_snapshots WHERE source = 'yahoo'").scalars().all()
-            assert len(quotes) == 3 and all(td is None for td in quotes)
+            assert len(quotes) == 4 and all(td is None for td in quotes)
 
         # History reads keep resolving to the same trade day's close.
         db = database.sessionmaker(bind=eng)()
@@ -314,6 +321,10 @@ def test_pg_0002_dedupe(caplog):
             # not Tuesday's 15:00 UTC intraday quote.
             tue = latest(_US, _utc("2026-11-17 21:32"))
             assert (tue.id, tue.trade_date) == ("us-tue-1635", date(2026, 11, 17))
+            # Wednesday bar (session open 14:30) + 21:30 close + 18:00 quote: after
+            # the close the read is the close, not the intraday quote.
+            wed = latest(_US, _utc("2026-11-18 22:00"))
+            assert (wed.id, wed.trade_date) == ("us-wed-eod", date(2026, 11, 18))
         finally:
             db.close()
 
