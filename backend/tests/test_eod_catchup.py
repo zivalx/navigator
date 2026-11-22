@@ -463,7 +463,7 @@ async def test_catchup_404_is_no_data_not_failure(db_session, env, caplog):
     with caplog.at_level("INFO", logger=scheduler_module.logger.name):
         await eod_catchup()  # must not raise
     assert [r.trade_date for r in _rows(db_session, good)] == [THU, FRI]
-    assert "GONE" not in caplog.text and gone.id in caplog.text
+    assert "GONE" in caplog.text and gone.id in caplog.text  # symbol and asset id are both logged
 
 
 @pytest.mark.asyncio

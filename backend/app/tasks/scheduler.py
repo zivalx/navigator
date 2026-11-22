@@ -112,7 +112,7 @@ async def snapshot_eod_prices() -> None:
                 error_count += 1
                 failed_ids.add(asset_id)
                 logger.warning(
-                    "EOD snapshot failed for asset %s: %s", asset_id, redact_secrets(e)
+                    "EOD snapshot failed for %s (asset %s): %s", asset.symbol, asset_id, redact_secrets(e)
                 )
 
         logger.info(
@@ -482,12 +482,12 @@ async def eod_catchup() -> None:
                     failed += 1
                     failed_ids.add(asset_id)
                     logger.warning(
-                        "EOD catch-up failed for asset %s: %s", asset_id, redact_secrets(e)
+                        "EOD catch-up failed for %s (asset %s): %s", asset.symbol, asset_id, redact_secrets(e)
                     )
                     continue
                 if offered is None:
                     no_data_ids.add(asset_id)
-                    logger.info("EOD catch-up: no Yahoo data for asset %s", asset_id)
+                    logger.info("EOD catch-up: no Yahoo data for %s (asset %s)", asset.symbol, asset_id)
                 else:
                     inserted += offered
 
