@@ -21,14 +21,21 @@ grep -qx 'POSTGRES_DB=navigator' .env.prod \
 docker network inspect edge >/dev/null 2>&1 \
     || { echo "ERROR: docker network 'edge' not found: run the zivalx-ops edge setup first"; exit 1; }
 
-# --- 1. pre-deploy dump (only if the database container is running) --------
-if [ "$(docker inspect -f '{{.State.Running}}' navigator-postgres 2>/dev/null || true)" = "true" ]; then
+# --- 1. pre-deploy dump (skipped only on a first deploy) --------------------
+# A container that exists but is stopped holds data: refuse to deploy over it
+# without a dump, instead of skipping the dump.
+pg_state="$(docker inspect -f '{{.State.Running}}' navigator-postgres 2>/dev/null || true)"
+if [ "$pg_state" = "false" ]; then
+    echo "ERROR: navigator-postgres exists but is not running; start it (docker start navigator-postgres) so it can be dumped, then re-run"
+    exit 1
+fi
+if [ "$pg_state" = "true" ]; then
     echo "### pre-deploy database dump"
     if [ -x /opt/zivalx-ops/backup/zbackup ]; then
         /opt/zivalx-ops/backup/zbackup dump navigator
     else
         BACKUP_DIR=/var/backups/navigator
-        mkdir -p "$BACKUP_DIR"
+        (umask 077; mkdir -p "$BACKUP_DIR")
         TS="$(date -u +%Y%m%dT%H%M%SZ)"
         OUT="$BACKUP_DIR/predeploy-$TS.dump"
         (
@@ -40,7 +47,7 @@ if [ "$(docker inspect -f '{{.State.Running}}' navigator-postgres 2>/dev/null ||
         ls -1t "$BACKUP_DIR"/predeploy-*.dump 2>/dev/null | tail -n +6 | while IFS= read -r old; do rm -f -- "$old"; done
     fi
 else
-    echo "### navigator-postgres not running: skipping pre-deploy dump (first deploy)"
+    echo "### navigator-postgres does not exist: skipping pre-deploy dump (first deploy)"
 fi
 
 # --- 2. pull latest --------------------------------------------------------
