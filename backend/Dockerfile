@@ -20,5 +20,6 @@ COPY . .
 # Expose port
 EXPOSE 7000
 
-# Run the application
+# Migrate, then run the application
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7000"]
