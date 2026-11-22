@@ -25,3 +25,15 @@ def test_redis_healthcheck_keeps_password_out_of_argv():
     assert "-a " not in joined
     assert "REDISCLI_AUTH" in joined
     assert "$$REDIS_PASSWORD" in joined  # compose-escaped: expanded in the container, not the host
+
+
+def test_redis_env_value_is_interpolated_password():
+    env = _redis()["environment"]
+    assert env["REDIS_PASSWORD"] == "${REDIS_PASSWORD}"
+
+
+def test_redis_command_reads_password_from_container_env():
+    command = _redis()["command"]
+    joined = command if isinstance(command, str) else " ".join(command)
+    assert "${REDIS_PASSWORD}" not in joined  # would be interpolated into argv
+    assert "$$REDIS_PASSWORD" in joined
