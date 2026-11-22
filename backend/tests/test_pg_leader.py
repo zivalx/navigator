@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 from alembic import command
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, make_url
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -103,10 +103,13 @@ def test_pg_upsert_heartbeat_updates_only_given_fields(monkeypatch):
 def test_pg_lock_connection_has_tcp_bounds():
     """Server bound (keepalives, 60 s user timeout) longer than the client's
     20 s tcp_user_timeout: the leader demotes before Postgres frees the lock."""
-    lock = PgAdvisoryLock(os.environ["TEST_POSTGRES_URL"])
+    # options already in the URL are kept; the server settings are appended
+    url = make_url(os.environ["TEST_POSTGRES_URL"]).update_query_dict({"options": "-csearch_path=leader_t"})
+    lock = PgAdvisoryLock(url.render_as_string(hide_password=False))
     try:
         assert lock.try_acquire()
         conn = lock._conn
+        assert conn.exec_driver_sql("SHOW search_path").scalar() == "leader_t"
         server = dict(conn.exec_driver_sql(
             "SELECT name, setting FROM pg_settings WHERE name IN "
             "('tcp_keepalives_idle', 'tcp_keepalives_interval', 'tcp_keepalives_count', 'tcp_user_timeout')"

@@ -32,13 +32,19 @@ LOCK_CALL_TIMEOUT_SECONDS = 10.0
 # How long stop() waits for an in-flight tick before giving up on it.
 _STOP_WAIT_SECONDS = 5.0
 
-# Split-brain invariant: the leader must stop its scheduler BEFORE Postgres
-# frees the lock, so the client bound must stay shorter than the server bound.
-# - Client: a ping fails within LOCK_CALL_TIMEOUT_SECONDS (asyncio) and libpq's
-#   tcp_user_timeout (20 s of unacknowledged data; keepalives only cover an
-#   idle socket, and without it an in-flight query retransmits for ~15 min).
-# - Server: this session is freed no sooner than the 30 s keepalive idle plus
-#   probes after the last packet it got, bounded by tcp_user_timeout 60 s.
+# Server side of the lock session (per-session settings, lock connection only).
+_SERVER_KEEPALIVES_IDLE = 30
+_SERVER_KEEPALIVES_INTERVAL = 10
+_SERVER_KEEPALIVES_COUNT = 3
+_SERVER_TCP_USER_TIMEOUT_MS = 60000
+_SERVER_TCP = (
+    f"-c tcp_keepalives_idle={_SERVER_KEEPALIVES_IDLE} "
+    f"-c tcp_keepalives_interval={_SERVER_KEEPALIVES_INTERVAL} "
+    f"-c tcp_keepalives_count={_SERVER_KEEPALIVES_COUNT} "
+    f"-c tcp_user_timeout={_SERVER_TCP_USER_TIMEOUT_MS}"
+)
+# Client side. keepalives only cover an idle socket; tcp_user_timeout bounds a
+# query in flight (without it Linux retransmits for ~15 min).
 _CLIENT_TCP = {
     "keepalives": 1,
     "keepalives_idle": 30,
@@ -46,10 +52,37 @@ _CLIENT_TCP = {
     "keepalives_count": 3,
     "tcp_user_timeout": 20000,  # ms
 }
-_SERVER_TCP = (  # per-session server settings for the lock connection only
-    "-c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 "
-    "-c tcp_keepalives_count=3 -c tcp_user_timeout=60000"
+
+# Split-brain invariant: the leader must stop its scheduler BEFORE Postgres
+# frees the lock, so the client bound must stay shorter than the server bound.
+# - Client: after the last packet of a good ping, the heartbeat stamp may take
+#   up to LOCK_CALL_TIMEOUT_SECONDS, the loop then sleeps one interval, and the
+#   next ping times out after LOCK_CALL_TIMEOUT_SECONDS and demotes:
+#   interval + 2 * call timeout = 30 + 20 = 50 s at most.
+# - Server: it frees the session no sooner than keepalive idle + count *
+#   interval = 30 + 3 * 10 = 60 s after the last packet it received
+#   (tcp_user_timeout 60 s bounds unacknowledged data the same way).
+_CLIENT_DEMOTE_BOUND_SECONDS = SCHEDULER_LEADER_INTERVAL_SECONDS + 2 * LOCK_CALL_TIMEOUT_SECONDS
+_SERVER_RELEASE_BOUND_SECONDS = min(
+    _SERVER_KEEPALIVES_IDLE + _SERVER_KEEPALIVES_COUNT * _SERVER_KEEPALIVES_INTERVAL,
+    _SERVER_TCP_USER_TIMEOUT_MS / 1000,
 )
+assert _CLIENT_DEMOTE_BOUND_SECONDS < _SERVER_RELEASE_BOUND_SECONDS, "leader would outlive its lock"
+
+
+def _lock_connect_args(database_url: str) -> dict:
+    """Client TCP settings, plus the server settings appended to any
+    `options` the URL already carries (never replacing them)."""
+    existing = make_url(database_url).query.get("options")
+    if isinstance(existing, tuple):  # ?options=a&options=b
+        existing = " ".join(existing)
+    options = f"{existing} {_SERVER_TCP}" if existing else _SERVER_TCP
+    return {**_CLIENT_TCP, "options": options}
+
+
+class LockBusy(Exception):
+    """A timed-out lock call is still running on the lock connection; this
+    tick must not touch the connection."""
 
 
 class LeaderLock(Protocol):
@@ -66,7 +99,7 @@ class PgAdvisoryLock:
     def __init__(self, database_url: str, key: int = SCHEDULER_LOCK_KEY):
         self._key = int(key)
         self._engine = create_engine(
-            database_url, poolclass=NullPool, connect_args={**_CLIENT_TCP, "options": _SERVER_TCP}
+            database_url, poolclass=NullPool, connect_args=_lock_connect_args(database_url)
         )
         self._conn: Connection | None = None
         self._pid: int | None = None
@@ -174,10 +207,14 @@ class SchedulerLeader:
                 if self._lock_busy():
                     return  # still stuck: leave the connection alone
                 await self._release_quietly()  # a late acquire may hold the lock; start clean
+                if self._lock_busy():
+                    return  # that release timed out too: never queue a call behind it
             if self._scheduler is None:
                 await self._follower_step()
             else:
                 await self._leader_step()
+        except LockBusy:
+            logger.debug("scheduler leader: lock call still running, tick skipped")
         except Exception as e:  # noqa: BLE001
             logger.error("scheduler leader tick failed: %s", redact_secrets(e))
 
@@ -211,14 +248,24 @@ class SchedulerLeader:
 
     async def _stamp(self, **fields) -> None:
         # Own session; on timeout the abandoned thread can finish harmlessly.
-        await asyncio.wait_for(
-            asyncio.to_thread(heartbeat.upsert_heartbeat, LEADER_HEARTBEAT, **fields),
-            timeout=self._call_timeout,
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(heartbeat.upsert_heartbeat, LEADER_HEARTBEAT, **fields),
+                timeout=self._call_timeout,
+            )
+        except TimeoutError:
+            logger.error(
+                "scheduler leader: heartbeat %s (%s) timed out after %ss",
+                LEADER_HEARTBEAT, ", ".join(fields), self._call_timeout,
+            )
 
     async def _lock_call(self, fn):
         """`fn()` in a thread, waiting at most call_timeout. On timeout the call
-        keeps running and is recorded in `_inflight`, and TimeoutError is raised."""
+        keeps running and is recorded in `_inflight`, and TimeoutError is raised.
+        The single gate to the lock: raises LockBusy instead of starting a call
+        while a timed-out one still runs, so calls never overlap."""
+        if self._lock_busy():
+            raise LockBusy(fn.__name__)
         fut = asyncio.ensure_future(asyncio.to_thread(fn))
         self._inflight = fut
         done, _ = await asyncio.wait({fut}, timeout=self._call_timeout)

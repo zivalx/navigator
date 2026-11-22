@@ -298,3 +298,94 @@ async def test_stop_gives_up_on_a_stuck_tick_without_releasing(monkeypatch):
     finally:
         lock.unblock.set()
         await asyncio.to_thread(lock.ping_returned.wait, 2)
+
+
+class StuckPingAndReleaseLock:
+    """ping() and release() block until their events are set; counts how many
+    lock calls run at once (must never exceed one)."""
+
+    def __init__(self):
+        self.ping_gate = threading.Event()
+        self.release_gate = threading.Event()
+        self.ping_done = threading.Event()
+        self.release_done = threading.Event()
+        self.calls = []
+        self.active = 0
+        self.max_active = 0
+        self._mu = threading.Lock()
+
+    def _call(self, name, gate=None, done=None, result=None):
+        with self._mu:
+            self.calls.append(name)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if gate is not None:
+                gate.wait(timeout=10)
+            return result
+        finally:
+            with self._mu:
+                self.active -= 1
+            if done is not None:
+                done.set()
+
+    def try_acquire(self):
+        return self._call("try_acquire", result=True)
+
+    def ping(self):
+        return self._call("ping", self.ping_gate, self.ping_done, result=True)
+
+    def release(self):
+        return self._call("release", self.release_gate, self.release_done)
+
+
+@pytest.mark.asyncio
+async def test_lock_calls_never_overlap_when_ping_and_release_both_hang():
+    lock = StuckPingAndReleaseLock()
+    leader = SchedulerLeader(lock, scheduler_factory=Factory(), call_timeout=0.05)
+    try:
+        await leader.tick()  # acquire
+        assert leader.is_leader
+        await leader.tick()  # ping hangs -> demoted
+        assert not leader.is_leader
+        for _ in range(3):
+            await leader.tick()  # ping still running: no new call
+        assert lock.calls == ["try_acquire", "ping"]
+
+        lock.ping_gate.set()
+        await asyncio.to_thread(lock.ping_done.wait, 2)
+        await _wait_for(lambda: leader._inflight.done())
+        await leader.tick()  # cleanup release hangs past call_timeout -> tick returns
+        for _ in range(3):
+            await leader.tick()  # release still running: no try_acquire queued behind it
+            assert not leader.is_leader
+        assert lock.calls == ["try_acquire", "ping", "release"]
+        assert lock.max_active == 1
+    finally:
+        lock.ping_gate.set()
+        lock.release_gate.set()
+    await asyncio.to_thread(lock.release_done.wait, 2)
+    await _wait_for(lambda: leader._inflight.done())
+    await leader.tick()  # all calls finished: clean up, then lead again
+    assert leader.is_leader and lock.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stamp_timeout_is_logged_by_name(monkeypatch, caplog):
+    stamp_gate = threading.Event()
+    monkeypatch.setattr(heartbeat, "upsert_heartbeat", lambda *a, **k: stamp_gate.wait(timeout=2))
+    leader = SchedulerLeader(FakeLock(), scheduler_factory=Factory(), call_timeout=0.05)
+    try:
+        with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+            await leader.tick()
+    finally:
+        stamp_gate.set()
+    assert leader.is_leader  # a slow heartbeat never costs leadership
+    assert _errors(caplog) == ["scheduler leader: heartbeat scheduler_leader (last_started_at) timed out after 0.05s"]
+
+
+def test_lock_connect_args_append_to_url_options():
+    plain = leader_module._lock_connect_args("postgresql://u:p@h/db")
+    assert plain["options"] == leader_module._SERVER_TCP and plain["tcp_user_timeout"] == 20000
+    merged = leader_module._lock_connect_args("postgresql://u:p@h/db?options=-csearch_path%3Dapp")
+    assert merged["options"] == "-csearch_path=app " + leader_module._SERVER_TCP
