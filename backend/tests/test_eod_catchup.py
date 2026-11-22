@@ -269,7 +269,10 @@ def test_catchup_start_rules():
 @pytest.mark.asyncio
 async def test_leader_startup_order(db_session, monkeypatch):
     monkeypatch.setattr(leader, "is_leader", lambda: True)
-    monkeypatch.setattr(heartbeat_module, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    maker = sessionmaker(bind=db_session.get_bind())
+    monkeypatch.setattr(heartbeat_module, "SessionLocal", maker)
+    monkeypatch.setattr(scheduler_module, "SessionLocal", maker)
+    monkeypatch.setattr(scheduler_module, "_utcnow", lambda: datetime(2026, 11, 18, 16, 0, tzinfo=timezone.utc))
     calls = []
 
     def recorder(name):
@@ -643,3 +646,89 @@ async def test_asset_bought_after_the_day_does_not_block_it(db_session, env, mon
     env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, []))
     await eod_catchup()
     assert computed == [FRI]
+
+
+# ---------------------------------------------------------------------------
+# leader_startup runs a missed 16:30 eod_snapshot (I3)
+# ---------------------------------------------------------------------------
+
+def _startup(monkeypatch, db_session, now, last_success):
+    maker = sessionmaker(bind=db_session.get_bind())
+    monkeypatch.setattr(leader, "is_leader", lambda: True)
+    monkeypatch.setattr(heartbeat_module, "SessionLocal", maker)
+    monkeypatch.setattr(scheduler_module, "SessionLocal", maker)
+    monkeypatch.setattr(scheduler_module, "_utcnow", lambda: now)
+    if last_success is not None:
+        heartbeat_module.upsert_heartbeat("eod_snapshot", last_success_at=last_success)
+    calls = []
+
+    async def snapshot():
+        calls.append("eod_snapshot")
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(scheduler_module, "snapshot_eod_prices", snapshot)
+    monkeypatch.setattr(scheduler_module, "eod_catchup", noop)
+    monkeypatch.setattr(scheduler_module, "backfill_daily_snapshots_job", noop)
+    monkeypatch.setattr(breadth_service, "ensure_breadth_warm", noop)
+    return calls
+
+
+def _ny(day, hour, minute=0):  # November: EST, UTC-5
+    return datetime(2026, 11, day, hour + 5, minute, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_startup_runs_missed_eod_snapshot_after_close(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=_ny(17, 16, 35))
+    await scheduler_module.leader_startup()
+    assert calls == ["eod_snapshot"]
+    db_session.expire_all()
+    from app.models.job_heartbeat import JobHeartbeat
+    assert db_session.query(JobHeartbeat).filter_by(job_name="eod_snapshot").one().last_success_at is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_never_runs_eod_snapshot_while_us_session_open(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, _ny(18, 11), last_success=_ny(16, 16, 35))
+    await scheduler_module.leader_startup()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_startup_skips_eod_snapshot_when_success_is_after_the_slot(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=_ny(18, 16, 40))
+    await scheduler_module.leader_startup()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_startup_before_todays_slot_checks_yesterdays(db_session, monkeypatch):
+    # 16:10 NY: closed, but today's slot is still ahead; yesterday's succeeded
+    calls = _startup(monkeypatch, db_session, _ny(18, 16, 10), last_success=_ny(17, 16, 35))
+    await scheduler_module.leader_startup()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_startup_weekend_with_friday_missed_runs_it(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+                     last_success=_ny(19, 16, 35))  # Thursday's run; Friday's slot was missed
+    await scheduler_module.leader_startup()
+    assert calls == ["eod_snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_startup_weekend_with_friday_done_does_not_run(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+                     last_success=_ny(20, 16, 35))
+    await scheduler_module.leader_startup()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_startup_runs_eod_snapshot_when_it_never_succeeded(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=None)
+    await scheduler_module.leader_startup()
+    assert calls == ["eod_snapshot"]

@@ -11,6 +11,7 @@ from ..database import SessionLocal
 from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
+from ..models.job_heartbeat import JobHeartbeat
 from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_marker
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
@@ -745,10 +746,64 @@ async def notify_triggered_alerts(db) -> None:
             )
 
 
+EOD_SNAPSHOT_HOUR, EOD_SNAPSHOT_MINUTE = 16, 30
+
+
+def _latest_eod_slot(now: datetime) -> datetime:
+    """The most recent 16:30 New York slot on a weekday that is not after `now`
+    (aware UTC). Holidays are not modelled."""
+    zone = ZoneInfo(NEW_YORK)
+    local_day = now.astimezone(zone).date()
+    for back in range(8):
+        day = local_day - timedelta(days=back)
+        if day.weekday() >= 5:
+            continue
+        slot = datetime.combine(
+            day, dt_time(EOD_SNAPSHOT_HOUR, EOD_SNAPSHOT_MINUTE), tzinfo=zone
+        ).astimezone(timezone.utc)
+        if slot <= now:
+            return slot
+    raise AssertionError("unreachable: a weekday slot exists within 8 days")
+
+
+def _eod_snapshot_missed(db, now: datetime) -> bool:
+    """True when the US session is closed and eod_snapshot has not succeeded
+    since the latest 16:30 New York slot that is already past (a leader change
+    rebuilds the in-memory jobstore, so a slot that fell in the gap never
+    fires). Never true while the session is open: the quotes would be
+    intraday prices, not a close."""
+    if is_in_session("US", now):
+        return False
+    last = (
+        db.query(JobHeartbeat.last_success_at)
+        .filter(JobHeartbeat.job_name == "eod_snapshot")
+        .scalar()
+    )
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return last < _latest_eod_slot(now)
+
+
+async def eod_snapshot_if_missed() -> None:
+    """leader_startup step: run the heartbeat-wrapped eod_snapshot now when its
+    16:30 slot was missed (see `_eod_snapshot_missed`)."""
+    db = SessionLocal()
+    try:
+        missed = _eod_snapshot_missed(db, _utcnow())
+    finally:
+        db.close()
+    if missed:
+        logger.info("leader_startup: eod_snapshot slot was missed, running it now")
+        await heartbeat("eod_snapshot")(snapshot_eod_prices)()
+
+
 async def leader_startup() -> None:
     """Runs once per new leadership, shortly after the lock is taken. Each
     step runs even if an earlier one failed; every step is idempotent."""
     for step in (
+        eod_snapshot_if_missed,  # before the catch-up, which would otherwise mis-fill today
         heartbeat("eod_catchup")(eod_catchup),
         backfill_daily_snapshots_job,  # after prices: it needs price history
         breadth_service.ensure_breadth_warm,
@@ -768,8 +823,8 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
     scheduler.add_job(
         heartbeat("eod_snapshot")(snapshot_eod_prices),
         "cron",
-        hour=16,
-        minute=30,
+        hour=EOD_SNAPSHOT_HOUR,
+        minute=EOD_SNAPSHOT_MINUTE,
         timezone=NEW_YORK,
         id="eod_snapshot",
         name="EOD Price Snapshot",
