@@ -1,13 +1,20 @@
 """Trading sessions, alertable-price rule and trade-date helper.
 
-Pure functions (no I/O). Holidays are deliberately not modelled: the consumers
-are built to be holiday-safe without a calendar.
+Pure functions, except `watched_assets` (one read query). Holidays are
+deliberately not modelled: the consumers are built to be holiday-safe without
+a calendar.
 """
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Literal, Optional
+from typing import Literal, Mapping, Optional
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from ..models.alert import PriceAlert
 from ..models.asset import Asset, AssetType, MarketRegion
+from ..models.holding import HoldingLot
 
 Exchange = Literal["US", "TASE", "crypto", "other"]
 
@@ -147,3 +154,42 @@ def trade_date_for(quote: dict, asset: Asset, now: datetime) -> date:
     except Exception:
         tz = ZoneInfo(SESSION_TABLE.get(exchange, ("UTC",))[0])
     return market_time.astimezone(tz).date()
+
+
+# Neutral outcomes never count for or against a price job: funds have no live
+# source, and `old_market_time` is what a holiday looks like (the quote is the
+# previous session's), which must pause alerts, not page anyone.
+NEUTRAL_REASONS = frozenset({"not_monitored", "old_market_time"})
+
+
+class QuoteBatchError(RuntimeError):
+    """Too many watched symbols came back unusable for a price job to count as healthy."""
+
+
+def watched_assets(db: Session) -> list[Asset]:
+    """Assets that are held or have an active alert, each once."""
+    held = db.query(HoldingLot.asset_id)
+    alerted = db.query(PriceAlert.asset_id).filter(PriceAlert.is_active.is_(True))
+    return (
+        db.query(Asset)
+        .filter(or_(Asset.id.in_(held), Asset.id.in_(alerted)))
+        .order_by(Asset.symbol)
+        .all()
+    )
+
+
+def check_quote_batch(reasons: Mapping[str, str]) -> None:
+    """Raise `QuoteBatchError` when a batch of per-symbol `is_alertable` reasons
+    is unhealthy: at least one counted symbol and either none is "ok" or more
+    than half are not. Neutral reasons are left out of the count. The message
+    holds counts per reason only (no symbols)."""
+    counted = [r for r in reasons.values() if r not in NEUTRAL_REASONS]
+    if not counted:
+        return
+    bad = sum(1 for r in counted if r != "ok")
+    if bad == len(counted) or bad * 2 > len(counted):
+        counts = Counter(counted)
+        detail = " ".join(f"{k}={counts[k]}" for k in sorted(counts))
+        raise QuoteBatchError(
+            f"{bad} of {len(counted)} watched symbols unusable ({detail})"
+        )

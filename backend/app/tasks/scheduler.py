@@ -16,7 +16,16 @@ from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
 from ..services.eod import eod_quote_time, upsert_eod
-from ..services.sessions import SESSION_TABLE, classify, session_bounds, trade_date_for
+from ..services.sessions import (
+    SESSION_TABLE,
+    check_quote_batch,
+    classify,
+    is_alertable,
+    is_in_session,
+    session_bounds,
+    trade_date_for,
+    watched_assets,
+)
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -423,6 +432,9 @@ async def evaluate_price_alerts() -> None:
             raise
 
         paused_symbols: set[str] = set()
+        now = _utcnow()
+        # symbol -> is_alertable reason: the unit of the batch failure rule.
+        reasons: dict[str, str] = {}
 
         triggered_count = 0
         dirty = False
@@ -430,8 +442,13 @@ async def evaluate_price_alerts() -> None:
             if not alert.asset:
                 continue
 
-            quote = quotes.get(alert.asset.symbol)
-            if not quote or quote.get("error") or quote.get("price") is None:
+            symbol = alert.asset.symbol
+            quote = quotes.get(symbol) or {"error": "no quote"}
+            alertable, reason = is_alertable(quote, alert.asset, now)
+            if alertable and quote.get("price") is None:
+                alertable, reason = False, "error"
+            reasons[symbol] = reason
+            if not alertable:
                 continue
 
             if pause_active and (
@@ -472,6 +489,12 @@ async def evaluate_price_alerts() -> None:
                 "paused pre-cutover alerts until audit --apply: %s",
                 sorted(paused_symbols),
             )
+        skipped = Counter(r for r in reasons.values() if r != "ok")
+        if skipped:
+            logger.warning(
+                "non-alertable quotes skipped: %s",
+                " ".join(f"{k}={skipped[k]}" for k in sorted(skipped)),
+            )
         if dirty:
             db.commit()
         if triggered_count:
@@ -480,9 +503,36 @@ async def evaluate_price_alerts() -> None:
             )
 
         await notify_triggered_alerts(db)
+        check_quote_batch(reasons)  # after the notify pass, so retries still go out
     except Exception:
         db.rollback()
         raise  # the heartbeat wrapper logs and records it
+    finally:
+        db.close()
+
+
+async def quote_refresh() -> None:
+    """Keep quotes (and the intraday snapshots the quote path writes) fresh for
+    held and alerted assets whose exchange is in session. Writes nothing itself;
+    raises `QuoteBatchError` under the price-job failure rule."""
+    now = _utcnow()
+    db = SessionLocal()
+    try:
+        assets = [a for a in watched_assets(db) if is_in_session(classify(a), now)]
+        if not assets:
+            logger.info("quote_refresh: no watched assets in session")
+            return
+        quotes = await MarketDataService(db).get_quotes([a.symbol for a in assets])
+        reasons = {}
+        for asset in assets:
+            quote = quotes.get(asset.symbol) or {"error": "no quote"}
+            reasons[asset.symbol] = is_alertable(quote, asset, now)[1]
+        logger.info(
+            "quote_refresh: %d symbol(s), %d ok",
+            len(reasons),
+            sum(1 for r in reasons.values() if r == "ok"),
+        )
+        check_quote_batch(reasons)
     finally:
         db.close()
 
@@ -611,11 +661,22 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
         misfire_grace_time=DAILY_MISFIRE_SECONDS,
     )
 
-    # Price alert evaluation every 5 minutes (default misfire grace, 120 s).
+    # Quote refresh every 5 minutes (default misfire grace, 120 s).
+    scheduler.add_job(
+        heartbeat("quote_refresh")(quote_refresh),
+        "interval",
+        minutes=5,
+        id="quote_refresh",
+        name="Quote Refresh",
+    )
+
+    # Price alert evaluation every 5 minutes, 30 s after the refresh so it
+    # rides the 60 s quote cache.
     scheduler.add_job(
         heartbeat("price_alert_evaluation")(evaluate_price_alerts),
         "interval",
         minutes=5,
+        start_date=_utcnow() + timedelta(seconds=30),
         id="price_alert_evaluation",
         name="Price Alert Evaluation",
     )

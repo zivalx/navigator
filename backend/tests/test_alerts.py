@@ -17,6 +17,7 @@ from app.models.alert import AlertRule, PriceAlert
 from app.models.asset import Asset, Currency
 from app.providers.yahoo import YahooFinanceProvider
 from app.services.market_data import MarketDataService
+from app.services.sessions import QuoteBatchError
 from app.tasks import scheduler as scheduler_module
 from tests.factories import make_alert, make_asset, patch_quotes, reload_alert
 
@@ -385,7 +386,8 @@ async def test_evaluate_skips_alert_when_its_own_quote_has_error(eval_db, monkey
     alert_id = alert.id
     patch_quotes(monkeypatch, {"AAPL": {"error": "no data"}})
 
-    await scheduler_module.evaluate_price_alerts()
+    with pytest.raises(QuoteBatchError):  # the only symbol failed: job failure rule
+        await scheduler_module.evaluate_price_alerts()
 
     alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is True
