@@ -70,6 +70,15 @@ class MarketDataService:
                 provider_used = "coingecko"
             except Exception as e:
                 errors.append(f"CoinGecko: {redact_secrets(e)}")
+            if not quote:
+                # Yahoo crypto pair; the quote keeps the caller's symbol.
+                yahoo_symbol = symbol.upper() if "-" in symbol else f"{symbol.upper()}-USD"
+                try:
+                    quote = await self.yahoo.get_quote(yahoo_symbol)
+                    quote["symbol"] = symbol.upper()
+                    provider_used = "yahoo"
+                except Exception as e:
+                    errors.append(f"Yahoo: {redact_secrets(e)}")
 
         # For stocks/ETFs/indices: Yahoo first (free, always available)
         if not quote and asset_type in ["stock", "etf", "index"]:

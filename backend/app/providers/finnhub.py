@@ -1,5 +1,5 @@
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 from .base import BaseProvider
 
 
@@ -38,7 +38,7 @@ class FinnhubProvider(BaseProvider):
                     "price": current_price,
                     "change": round(change, 2),
                     "changePercent": round(change_percent, 2),
-                    "timestamp": datetime.fromtimestamp(data.get("t", 0)),
+                    "timestamp": datetime.fromtimestamp(data.get("t", 0), tz=timezone.utc),
                     "currency": "USD",
                     "high": data.get("h", 0),
                     "low": data.get("l", 0),

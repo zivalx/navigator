@@ -1,5 +1,5 @@
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 from .base import BaseProvider
 
@@ -40,7 +40,7 @@ class PolygonProvider(BaseProvider):
                     "price": close,
                     "change": round(change, 2),
                     "changePercent": round(change_percent, 2),
-                    "timestamp": datetime.fromtimestamp(result.get("t", 0) / 1000),
+                    "timestamp": datetime.fromtimestamp(result.get("t", 0) / 1000, tz=timezone.utc),
                     "currency": "USD",
                     "volume": result.get("v"),
                     "high": result.get("h"),
@@ -86,7 +86,7 @@ class PolygonProvider(BaseProvider):
                 "price": day.get("c", 0),
                 "change": day.get("c", 0) - prev_day.get("c", 0),
                 "changePercent": ((day.get("c", 0) - prev_day.get("c", 0)) / prev_day.get("c", 1)) * 100,
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now(timezone.utc),
                 "currency": "USD",
                 "volume": day.get("v", 0),
                 "high": day.get("h", 0),

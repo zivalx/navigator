@@ -153,3 +153,46 @@ async def test_search_does_not_invent_usd_currency():
     [hit] = await provider.search("teva")
     assert hit["symbol"] == "TEVA.TA"
     assert hit["currency"] is None
+
+
+@pytest.mark.asyncio
+async def test_yahoo_quote_carries_market_time():
+    meta = {
+        "currency": "USD",
+        "regularMarketPrice": 150.0,
+        "chartPreviousClose": 148.0,
+        "regularMarketTime": 1763740800,
+        "exchangeTimezoneName": "America/New_York",
+    }
+    provider = _provider(lambda req: httpx.Response(200, json=_chart_body(meta)))
+    quote = await provider.get_quote("AAPL")
+    assert quote["marketTime"] == "2025-11-21T16:00:00+00:00"
+    assert quote["exchangeTimezone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_provider_timestamps_are_aware_utc():
+    from app.providers.coingecko import CoinGeckoProvider
+    from app.providers.finnhub import FinnhubProvider
+    from app.providers.polygon import PolygonProvider
+
+    def parse(v):
+        return v if isinstance(v, datetime) else datetime.fromisoformat(v)
+
+    def client(body):
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+        )
+
+    y = _provider(lambda req: httpx.Response(200, json=_chart_body(
+        {"currency": "USD", "regularMarketPrice": 1.0, "chartPreviousClose": 1.0})))
+    cg = CoinGeckoProvider()
+    cg.client = client({"bitcoin": {"usd": 100.0, "usd_24h_change": 1.0, "usd_24h_vol": 5}})
+    pg = PolygonProvider(api_key="k")
+    pg.client = client({"status": "OK", "results": [{"c": 2.0, "o": 1.0, "t": 1763740800000}]})
+    fh = FinnhubProvider(api_key="k")
+    fh.client = client({"c": 2.0, "d": 1.0, "dp": 1.0, "t": 1763740800})
+
+    for q in (await y.get_quote("AAPL"), await cg.get_quote("BTC"),
+              await pg.get_quote("AAPL"), await fh.get_quote("AAPL")):
+        assert parse(q["timestamp"]).utcoffset().total_seconds() == 0
