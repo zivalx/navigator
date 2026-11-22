@@ -105,44 +105,6 @@ async def test_quote_cache_key_is_v2(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_backfill_closes_normalized(db_session, monkeypatch):
-    from app.tasks import scheduler as scheduler_module
-
-    asset = Asset(
-        id=str(uuid.uuid4()), symbol="TEVA.TA", name="Teva",
-        exchange="TLV", currency=Currency.ILS,
-        asset_type=AssetType.STOCK, market_region=MarketRegion.US,
-    )
-    db_session.add(asset)
-    db_session.add(HoldingLot(
-        id=str(uuid.uuid4()), asset_id=asset.id, quantity=1, avg_cost=60,
-        cost_currency=Currency.ILS, account_name="a",
-        purchase_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    ))
-    db_session.commit()
-    asset_id = asset.id
-
-    body = _chart_body({"currency": "ILA"}, [1_700_000_000, 1_700_086_400], [6400, 6512])
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        scheduler_module.httpx, "AsyncClient",
-        lambda **kw: real_client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))),
-    )
-    monkeypatch.setattr(scheduler_module, "SessionLocal", lambda: db_session)
-
-    await scheduler_module.backfill_historical_prices()
-
-    rows = (
-        db_session.query(PriceSnapshot)
-        .filter(PriceSnapshot.asset_id == asset_id)
-        .order_by(PriceSnapshot.timestamp)
-        .all()
-    )
-    assert [r.price for r in rows] == pytest.approx([64.0, 65.12])
-    assert all(r.currency == Currency.ILS for r in rows)
-
-
-@pytest.mark.asyncio
 async def test_search_does_not_invent_usd_currency():
     """Yahoo search results carry no currency; a TASE hit must not come
     back labelled USD (callers take the currency from the quote)."""

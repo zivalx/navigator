@@ -1,7 +1,7 @@
 import logging
-import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -16,7 +16,7 @@ from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
 from ..services.eod import eod_quote_time, upsert_eod
-from ..services.sessions import classify, trade_date_for
+from ..services.sessions import SESSION_TABLE, classify, session_bounds, trade_date_for
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -142,114 +142,188 @@ async def backfill_daily_snapshots_job() -> None:
         db.close()
 
 
-async def backfill_historical_prices() -> None:
-    """
-    One-time backfill of historical prices from Yahoo Finance.
-    Runs only when fewer than 5 eod_snapshot rows exist in the database.
-    """
+CATCHUP_DEFAULT_DAYS = 183  # Yahoo's old 6mo range
+CATCHUP_MAX_DAYS = 400
+CATCHUP_OVERLAP_DAYS = 5
+PORTFOLIO_CATCHUP_DAYS = 30
+
+
+def _catchup_start(last_trade_date: date | None, now: datetime) -> datetime:
+    """Start of the Yahoo window: five days before the asset's latest EOD
+    trade date (midnight UTC), else 183 days back; never earlier than 400."""
+    if last_trade_date is None:
+        start = now - timedelta(days=CATCHUP_DEFAULT_DAYS)
+    else:
+        start = datetime.combine(
+            last_trade_date - timedelta(days=CATCHUP_OVERLAP_DAYS),
+            dt_time(0, 0),
+            tzinfo=timezone.utc,
+        )
+    return max(start, now - timedelta(days=CATCHUP_MAX_DAYS))
+
+
+def _bar_zone(meta: dict, exchange: str) -> ZoneInfo:
+    name = meta.get("exchangeTimezoneName") or SESSION_TABLE.get(exchange, ("UTC",))[0]
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001
+        return ZoneInfo("UTC")
+
+
+def _bar_row_time(
+    exchange: str, trade_date: date, bar_ts: datetime, local_today: date, now: datetime
+) -> datetime | None:
+    """The `ts` to store for a daily bar, or None if the bar is not a finished
+    session day (today's in-progress bar, a day with no session)."""
+    if trade_date > local_today:
+        return None
+    if exchange == "crypto":
+        if trade_date >= now.astimezone(timezone.utc).date():
+            return None
+        return datetime.combine(trade_date, dt_time(23, 59, 59), tzinfo=timezone.utc)
+    if exchange == "other":
+        return None if trade_date >= local_today else bar_ts
+    bounds = session_bounds(exchange, trade_date)
+    if bounds is None:  # no session that day: nothing to record
+        return None
+    close = bounds[1]
+    if trade_date == local_today and now < close:
+        return None
+    return close
+
+
+async def _catchup_asset(db, client: httpx.AsyncClient, asset: Asset, now: datetime) -> int:
+    """Insert the missing EOD rows for one asset from Yahoo daily bars; never
+    overwrites. Returns the number of bars offered to the insert."""
+    last = (
+        db.query(func.max(PriceSnapshot.trade_date))
+        .filter(PriceSnapshot.asset_id == asset.id, PriceSnapshot.trade_date.isnot(None))
+        .scalar()
+    )
+    start = _catchup_start(last, now)
+    # Crypto trades on Yahoo as "<SYM>-USD" (e.g. BTC-USD). The bare ticker
+    # ("BTC") is an unrelated ~$35 equity that would poison NAV history.
+    yahoo_symbol = asset.symbol.upper()
+    if asset.asset_type.value == "crypto" and "-" not in yahoo_symbol:
+        yahoo_symbol = f"{yahoo_symbol}-USD"
+    response = await client.get(
+        YAHOO_CHART_URL.format(symbol=yahoo_symbol),
+        params={
+            "interval": "1d",
+            "period1": int(start.timestamp()),
+            "period2": int(now.timestamp()),
+        },
+        headers=YAHOO_HEADERS,
+    )
+    response.raise_for_status()
+    result = response.json().get("chart", {}).get("result")
+    if not result:
+        logger.warning("EOD catch-up: no Yahoo data for %s", asset.symbol)
+        return 0
+
+    meta = result[0].get("meta", {})
+    timestamps = result[0].get("timestamp") or []
+    closes = (result[0].get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+    currency, factor = normalize_quote_currency(meta.get("currency"))
+    exchange = classify(asset)
+    zone = ZoneInfo("UTC") if exchange == "crypto" else _bar_zone(meta, exchange)
+    local_today = now.astimezone(zone).date()
+
+    written = 0
+    for raw_ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        bar_ts = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        trade_date = bar_ts.astimezone(zone).date()
+        row_ts = _bar_row_time(exchange, trade_date, bar_ts, local_today, now)
+        if row_ts is None:
+            continue
+        upsert_eod(
+            db,
+            asset,
+            price=round(close * factor, 6) if factor != 1.0 else close,
+            currency=currency,
+            ts=row_ts,
+            trade_date=trade_date,
+            source="eod_backfill",
+            overwrite=False,
+        )
+        written += 1
+    db.commit()
+    return written
+
+
+async def _portfolio_catchup(db, asset_ids: list[str], now: datetime) -> None:
+    """Compute portfolio rows for recent UTC days that have an EOD row but no
+    portfolio row. Existing rows are never recomputed. Skipped while the table
+    is empty: `backfill_daily_pnl` owns the initial fill."""
+    if db.query(PortfolioSnapshot.id).first() is None:
+        return
+    today = now.astimezone(timezone.utc).date()
+    first = today - timedelta(days=PORTFOLIO_CATCHUP_DAYS)
+    have_eod = {
+        row[0]
+        for row in db.query(PriceSnapshot.trade_date)
+        .filter(
+            PriceSnapshot.asset_id.in_(asset_ids),
+            PriceSnapshot.trade_date >= first,
+            PriceSnapshot.trade_date < today,
+        )
+        .distinct()
+    }
+    have_portfolio = {
+        row[0]
+        for row in db.query(PortfolioSnapshot.date).filter(
+            PortfolioSnapshot.date >= first, PortfolioSnapshot.date < today
+        )
+    }
+    svc = PortfolioService(db, base_currency=Currency.USD)
+    for day in sorted(have_eod - have_portfolio):
+        await svc.compute_daily_snapshot(day)
+
+
+async def eod_catchup() -> None:
+    """Fill missed end-of-day days from Yahoo daily bars (never overwriting),
+    then the portfolio rows they enable. Everything possible is written first;
+    the job raises at the end if any asset or the portfolio phase failed."""
+    now = _utcnow()
     db = SessionLocal()
     try:
-        eod_count = (
-            db.query(func.count(PriceSnapshot.id))
-            .filter(PriceSnapshot.source == "eod_snapshot")
-            .scalar()
-        )
-
-        if eod_count >= 5:
-            logger.info(
-                "Backfill skipped: already have %d EOD snapshots", eod_count
-            )
-            return
-
-        asset_ids = (
-            db.query(HoldingLot.asset_id)
-            .distinct()
-            .all()
-        )
-        asset_ids = [row[0] for row in asset_ids]
-
+        asset_ids = [row[0] for row in db.query(HoldingLot.asset_id).distinct().all()]
         if not asset_ids:
-            logger.info("Backfill: no holdings found, skipping")
+            logger.info("EOD catch-up: no holdings found, skipping")
             return
 
-        total_inserted = 0
-
+        failed = 0
+        inserted = 0
         async with httpx.AsyncClient(timeout=15.0) as client:
             for asset_id in asset_ids:
                 asset = db.query(Asset).filter(Asset.id == asset_id).first()
                 if not asset:
                     continue
-
                 try:
-                    # Crypto trades on Yahoo as "<SYM>-USD" (e.g. BTC-USD).
-                    # Using the bare ticker ("BTC") returns an unrelated ~$35
-                    # equity, which poisons NAV/daily-P&L history — so map
-                    # crypto symbols to the -USD pair.
-                    yahoo_symbol = asset.symbol.upper()
-                    if asset.asset_type.value == "crypto" and "-" not in yahoo_symbol:
-                        yahoo_symbol = f"{yahoo_symbol}-USD"
-                    url = YAHOO_CHART_URL.format(symbol=yahoo_symbol)
-                    params = {"interval": "1d", "range": "6mo"}
-                    response = await client.get(
-                        url, params=params, headers=YAHOO_HEADERS
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-
-                    result = data.get("chart", {}).get("result")
-                    if not result:
-                        logger.warning(
-                            "Backfill: no Yahoo data for %s", asset.symbol
-                        )
-                        continue
-
-                    timestamps = result[0].get("timestamp", [])
-                    closes = (
-                        result[0]
-                        .get("indicators", {})
-                        .get("quote", [{}])[0]
-                        .get("close", [])
-                    )
-                    currency, factor = normalize_quote_currency(
-                        result[0].get("meta", {}).get("currency")
-                    )
-
-                    snapshots = []
-                    for ts, close in zip(timestamps, closes):
-                        if close is None:
-                            continue
-                        snapshots.append(
-                            PriceSnapshot(
-                                id=str(uuid.uuid4()),
-                                asset_id=asset.id,
-                                price=round(close * factor, 6) if factor != 1.0 else close,
-                                currency=currency,
-                                timestamp=datetime.fromtimestamp(
-                                    ts, tz=timezone.utc
-                                ),
-                                source="eod_backfill",
-                            )
-                        )
-
-                    if snapshots:
-                        db.bulk_save_objects(snapshots)
-                        db.commit()
-                        total_inserted += len(snapshots)
-                        logger.info(
-                            "Backfill: inserted %d snapshots for %s",
-                            len(snapshots),
-                            asset.symbol,
-                        )
-
-                except Exception as e:
+                    inserted += await _catchup_asset(db, client, asset, now)
+                except Exception as e:  # noqa: BLE001
                     db.rollback()
+                    failed += 1
                     logger.warning(
-                        "Backfill failed for %s: %s", asset.symbol, e
+                        "EOD catch-up failed for %s: %s", asset.symbol, redact_secrets(e)
                     )
 
-        logger.info("Backfill complete: %d total snapshots inserted", total_inserted)
-    except Exception as e:
-        logger.error("Backfill job error: %s", e)
+        portfolio_failed = False
+        try:
+            await _portfolio_catchup(db, asset_ids, now)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            portfolio_failed = True
+            logger.warning("Portfolio catch-up failed: %s", redact_secrets(e))
+
+        logger.info("EOD catch-up complete: %d bars offered, %d asset(s) failed", inserted, failed)
+        if failed or portfolio_failed:
+            message = f"EOD catch-up: {failed} asset(s) failed"
+            if portfolio_failed:
+                message += ", portfolio catch-up failed"
+            raise RuntimeError(message)
     finally:
         db.close()
 
@@ -443,7 +517,7 @@ async def leader_startup() -> None:
     """Runs once per new leadership, shortly after the lock is taken. Each
     step runs even if an earlier one failed; every step is idempotent."""
     for step in (
-        backfill_historical_prices,
+        heartbeat("eod_catchup")(eod_catchup),
         backfill_daily_snapshots_job,  # after prices: it needs price history
         breadth_service.ensure_breadth_warm,
     ):
@@ -480,6 +554,18 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
         timezone=NEW_YORK,
         id="breadth_snapshot",
         name="Market Breadth Computation (S5FI/S5TH)",
+        misfire_grace_time=DAILY_MISFIRE_SECONDS,
+    )
+
+    # Daily catch-up of missed EOD days at 17:15 New York.
+    scheduler.add_job(
+        heartbeat("eod_catchup")(eod_catchup),
+        "cron",
+        hour=17,
+        minute=15,
+        timezone=NEW_YORK,
+        id="eod_catchup",
+        name="EOD Catch-up",
         misfire_grace_time=DAILY_MISFIRE_SECONDS,
     )
 

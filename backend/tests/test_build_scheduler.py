@@ -65,7 +65,14 @@ def test_no_leader_startup_without_startup_at():
 
 
 @pytest.mark.asyncio
-async def test_leader_startup_runs_each_step_in_order_despite_failures(monkeypatch):
+async def test_leader_startup_runs_each_step_in_order_despite_failures(db_session, monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.tasks import heartbeat as heartbeat_module, leader
+
+    # eod_catchup runs inside its heartbeat wrapper (leader guard + SessionLocal).
+    monkeypatch.setattr(leader, "is_leader", lambda: True)
+    monkeypatch.setattr(heartbeat_module, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
     calls = []
 
     def step(name, fail=False):
@@ -75,7 +82,7 @@ async def test_leader_startup_runs_each_step_in_order_despite_failures(monkeypat
                 raise RuntimeError(f"{name} broke")
         return run
 
-    monkeypatch.setattr(scheduler_module, "backfill_historical_prices", step("prices", fail=True))
+    monkeypatch.setattr(scheduler_module, "eod_catchup", step("prices", fail=True))
     monkeypatch.setattr(scheduler_module, "backfill_daily_snapshots_job", step("daily_pnl", fail=True))
     monkeypatch.setattr(scheduler_module.breadth_service, "ensure_breadth_warm", step("breadth"))
     await scheduler_module.leader_startup()
