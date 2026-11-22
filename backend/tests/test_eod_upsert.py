@@ -25,7 +25,7 @@ def _rows(db, asset):
     return db.query(PriceSnapshot).filter_by(asset_id=asset.id).all()
 
 
-def check_overwrite_updates_price_and_ts(db):
+def check_overwrite_updates_price_keeps_earlier_ts(db):
     asset = make_asset(db, symbol="OVR")
     upsert_eod(db, asset, 100.0, "USD", TS1, D, "eod_backfill", overwrite=True)
     upsert_eod(db, asset, 101.0, "USD", TS2, D, "eod_snapshot", overwrite=True)
@@ -33,7 +33,7 @@ def check_overwrite_updates_price_and_ts(db):
     rows = _rows(db, asset)
     assert len(rows) == 1
     row = rows[0]
-    assert row.price == 101.0 and _utc(row.timestamp) == TS2
+    assert row.price == 101.0 and _utc(row.timestamp) == TS1  # earlier ts kept
     assert row.source == "eod_snapshot" and row.trade_date == D
 
 
@@ -58,8 +58,8 @@ def check_quote_snapshots_keep_null_trade_date(db):
     assert len(rows) == 2 and all(r.trade_date is None for r in rows)
 
 
-def test_upsert_eod_overwrite_updates_price_and_ts(db_session):
-    check_overwrite_updates_price_and_ts(db_session)
+def test_upsert_eod_overwrite_updates_price_keeps_earlier_ts(db_session):
+    check_overwrite_updates_price_keeps_earlier_ts(db_session)
 
 
 def test_upsert_eod_do_nothing_keeps_existing(db_session):

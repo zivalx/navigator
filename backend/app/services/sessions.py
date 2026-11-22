@@ -91,7 +91,7 @@ def latest_session_open(exchange: str, now: datetime) -> Optional[datetime]:
     return None
 
 
-def _parse_market_time(value) -> Optional[datetime]:
+def parse_market_time(value) -> Optional[datetime]:
     if not value:
         return None
     try:
@@ -117,7 +117,7 @@ def is_alertable(quote: dict, asset: Asset, now: datetime) -> tuple[bool, str]:
     if source not in allowed:
         return False, "source"
     exchange = classify(asset)
-    market_time = _parse_market_time(quote.get("marketTime"))
+    market_time = parse_market_time(quote.get("marketTime"))
     if exchange == "crypto":
         if source == "yahoo" and market_time is None:
             return False, "no_market_time"
@@ -138,7 +138,7 @@ def trade_date_for(quote: dict, asset: Asset, now: datetime) -> date:
     exchange = classify(asset)
     if exchange == "crypto":
         return now.astimezone(timezone.utc).date()
-    market_time = _parse_market_time(quote.get("marketTime")) or now
+    market_time = parse_market_time(quote.get("marketTime")) or now
     tzname = quote.get("exchangeTimezone")
     if not tzname:
         tzname = SESSION_TABLE.get(exchange, ("UTC",))[0]

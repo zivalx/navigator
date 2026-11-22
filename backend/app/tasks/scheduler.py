@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 
 import httpx
@@ -14,8 +15,8 @@ from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_ma
 from ..models.price import PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
-from ..services.eod import upsert_eod
-from ..services.sessions import _parse_market_time, classify, is_alertable, trade_date_for
+from ..services.eod import eod_quote_time, upsert_eod
+from ..services.sessions import classify, trade_date_for
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -61,6 +62,7 @@ async def snapshot_eod_prices() -> None:
         market_service = MarketDataService(db)
         success_count = 0
         error_count = 0
+        skipped: Counter = Counter()
         portfolio_failed = False
 
         for asset_id in asset_ids:
@@ -72,28 +74,21 @@ async def snapshot_eod_prices() -> None:
                 quote = await market_service.get_quote(
                     asset.symbol, asset.asset_type.value
                 )
-                # Only a live, in-session-fresh quote is an EOD close; stale,
-                # cached or unmonitored quotes are skipped, not errors.
+                # EOD eligibility is its own check (not alert eligibility):
+                # skipped quotes are counted by reason, not errors.
                 now = _utcnow()
-                ok, reason = is_alertable(quote, asset, now)
-                if not ok:
-                    logger.info(
-                        "EOD snapshot: skipping %s, quote not alertable (%s)",
-                        asset.symbol,
-                        reason,
-                    )
+                quote_ts, reason = eod_quote_time(quote)
+                if quote_ts is None:
+                    skipped[reason] += 1
                     continue
-                if classify(asset) == "crypto":
-                    ts = now
-                else:
-                    ts = _parse_market_time(quote.get("marketTime")) or now
+                dated = {**quote, "marketTime": quote_ts}
                 upsert_eod(
                     db,
                     asset,
                     price=quote["price"],
                     currency=quote.get("currency", "USD"),
-                    ts=ts,
-                    trade_date=trade_date_for(quote, asset, now),
+                    ts=now if classify(asset) == "crypto" else quote_ts,
+                    trade_date=trade_date_for(dated, asset, now),
                     source="eod_snapshot",
                     overwrite=True,
                 )
@@ -107,9 +102,11 @@ async def snapshot_eod_prices() -> None:
                 )
 
         logger.info(
-            "EOD snapshot complete: %d succeeded, %d failed",
+            "EOD snapshot complete: %d succeeded, %d failed, %d skipped %s",
             success_count,
             error_count,
+            sum(skipped.values()),
+            dict(sorted(skipped.items())),
         )
 
         # After per-asset EOD prices are stored, roll up today's portfolio row.

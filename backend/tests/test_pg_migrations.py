@@ -199,7 +199,7 @@ def test_pg_upsert_eod():
         command.upgrade(alembic_config(eng), "head")
         db = database.sessionmaker(autocommit=False, autoflush=False, bind=eng)()
         try:
-            t.check_overwrite_updates_price_and_ts(db)
+            t.check_overwrite_updates_price_keeps_earlier_ts(db)
             t.check_do_nothing_keeps_existing(db)
             t.check_quote_snapshots_keep_null_trade_date(db)
         finally:
