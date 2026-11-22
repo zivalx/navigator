@@ -12,6 +12,10 @@ close until Saturday evening, and a close must not move back to an
 eod_backfill bar's session-open time, behind that day's intraday quotes.
 The deleted rows are not restored by downgrade().
 
+Dev databases only: before 2026 TASE traded on Sundays, so pre-2026 TASE
+Sunday rows are remapped to Friday too (a wrong date for a real Sunday
+session, accepted: production starts fresh at head).
+
 Revision ID: 0002
 Revises: 0001
 Create Date: 2026-11-22

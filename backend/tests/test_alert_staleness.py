@@ -184,3 +184,42 @@ async def test_quote_refresh_job_registered():
     gap = evaluate.next_run_time - refresh.next_run_time
     assert evaluate.trigger.interval == timedelta(minutes=5)
     assert timedelta(seconds=-290) < gap < timedelta(seconds=-250)  # first eval at +30 s
+
+
+@pytest.mark.asyncio
+async def test_neutral_reasons_log_at_info_not_in_warning_count(eval_db, monkeypatch, caplog):
+    monkeypatch.setattr(scheduler_module, "_utcnow", lambda: SUN_0900Z)
+    fund = make_asset(eval_db, symbol="FND")
+    fund.asset_type = AssetType.FUND
+    eval_db.commit()
+    make_alert(eval_db, fund, threshold=100.0)
+    btc = make_asset(eval_db, symbol="BTC", exchange="CRYPTO")
+    btc.asset_type = AssetType.CRYPTO
+    eval_db.commit()
+    make_alert(eval_db, btc, threshold=1.0)
+    patch_quotes(monkeypatch, {"FND": {"price": 50.0},
+                               "BTC": {"price": 50000.0, "source": "coingecko", "marketTime": SUN_0900Z.isoformat()}})
+    with caplog.at_level(logging.INFO, logger=scheduler_module.logger.name):
+        await scheduler_module.evaluate_price_alerts()
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING and "non-alertable" in r.getMessage()]
+    neutral = [r for r in caplog.records if "neutral" in r.getMessage()]
+    assert len(neutral) == 1 and neutral[0].levelno == logging.INFO
+    assert "not_monitored=1" in neutral[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_quote_refresh_does_not_fetch_funds(eval_db, monkeypatch):
+    from app.models.asset import MarketRegion
+
+    monkeypatch.setattr(scheduler_module, "_utcnow", lambda: SUN_0900Z)
+    fund = make_asset(eval_db, symbol="FND", market_region=MarketRegion.EU)  # "other": always in session
+    fund.asset_type = AssetType.FUND
+    eval_db.commit()
+    eval_db.add(HoldingLot(id=str(uuid.uuid4()), asset_id=fund.id, quantity=1, avg_cost=1.0,
+                           cost_currency=Currency.USD, account_name="a",
+                           purchase_date=SUN_0900Z - timedelta(days=5)))
+    eval_db.commit()
+    fetched = _fetch_recorder(monkeypatch, _ok)
+    await scheduler_module.quote_refresh()
+    assert fetched == []

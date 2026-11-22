@@ -18,6 +18,8 @@ from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
 from ..services.eod import eod_quote_time, upsert_eod
 from ..services.sessions import (
+    ALERTABLE_SOURCES,
+    NEUTRAL_REASONS,
     SESSION_TABLE,
     check_quote_batch,
     classify,
@@ -592,9 +594,7 @@ async def evaluate_price_alerts() -> None:
             if not alertable:
                 continue
 
-            if pause_active and (
-                quote.get("unitFactor", 1.0) != 1.0 or quote.get("stale")
-            ):
+            if pause_active and quote.get("unitFactor", 1.0) != 1.0:
                 created = alert.created_at
                 if created is not None and created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
@@ -630,11 +630,19 @@ async def evaluate_price_alerts() -> None:
                 "paused pre-cutover alerts until audit --apply: %s",
                 sorted(paused_symbols),
             )
-        skipped = Counter(r for r in reasons.values() if r != "ok")
+        # Neutral outcomes (a holiday's previous-session quote, a fund) are
+        # expected: INFO, not part of the warning count.
+        skipped = Counter(r for r in reasons.values() if r != "ok" and r not in NEUTRAL_REASONS)
+        neutral = Counter(r for r in reasons.values() if r in NEUTRAL_REASONS)
         if skipped:
             logger.warning(
                 "non-alertable quotes skipped: %s",
                 " ".join(f"{k}={skipped[k]}" for k in sorted(skipped)),
+            )
+        if neutral:
+            logger.info(
+                "quotes not evaluated (neutral): %s",
+                " ".join(f"{k}={neutral[k]}" for k in sorted(neutral)),
             )
         if dirty:
             db.commit()
@@ -659,7 +667,12 @@ async def quote_refresh() -> None:
     now = _utcnow()
     db = SessionLocal()
     try:
-        assets = [a for a in watched_assets(db) if is_in_session(classify(a), now)]
+        # Only types with a live alert source: funds have none (not_monitored),
+        # so fetching them every 5 minutes would be wasted calls.
+        assets = [
+            a for a in watched_assets(db)
+            if a.asset_type.value in ALERTABLE_SOURCES and is_in_session(classify(a), now)
+        ]
         if not assets:
             logger.info("quote_refresh: no watched assets in session")
             return
