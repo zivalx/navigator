@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     app_env: str = "development"
     secret_key: str = "dev-secret-key-change-in-production"
     cors_origins: str = "http://localhost:5173,http://localhost:7070,http://localhost:3000,http://localhost:3002"
+    # Level for the `app` package loggers (INFO, DEBUG, WARNING, ...)
+    log_level: str = "INFO"
     # false: this process runs no scheduler leader loop (scripts, a laptop on a shared DB)
     scheduler_enabled: bool = True
 

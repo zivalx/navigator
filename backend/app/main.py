@@ -5,6 +5,9 @@ from .config import settings
 from .cache import cache
 from .database import init_db
 from .tasks import leader as scheduler_leader
+from .logging_config import configure_logging
+
+configure_logging()
 
 
 @asynccontextmanager
