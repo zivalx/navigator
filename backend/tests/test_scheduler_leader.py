@@ -1,5 +1,8 @@
 """SchedulerLeader with a mocked lock and a fake scheduler (no Postgres)."""
 import asyncio
+import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -142,32 +145,42 @@ async def test_demoted_leader_can_lead_again():
     assert leader.is_leader and len(factory.calls) == 2 and factory.built[1].started
 
 
+def _errors(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "app.tasks.leader" and r.levelno == logging.ERROR]
+
+
 @pytest.mark.asyncio
-async def test_failed_start_gives_the_lock_back():
+async def test_failed_start_gives_the_lock_back(caplog):
     lock = FakeLock()
 
     def broken_factory(startup_at=None):
         raise RuntimeError("bad job config")
 
     leader = SchedulerLeader(lock, scheduler_factory=broken_factory)
-    await leader.tick()  # logged, not raised
+    with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+        await leader.tick()  # logged, not raised
     assert not leader.is_leader and lock.events == ["release"]
+    assert _errors(caplog) == ["scheduler leader tick failed: bad job config"]
 
 
 @pytest.mark.asyncio
-async def test_loop_survives_lock_errors():
+async def test_loop_survives_lock_errors(caplog):
     err = OperationalError("SELECT pg_try_advisory_lock(7400418)", {}, Exception("server closed the connection"))
     lock = FakeLock(acquire=[err, True])
     leader = SchedulerLeader(lock, scheduler_factory=Factory(), interval=0.01)
-    await leader.start()
-    try:
-        for _ in range(200):
-            if leader.is_leader:
-                break
-            await asyncio.sleep(0.01)
-        assert leader.is_leader
-    finally:
-        await leader.stop()
+    with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+        await leader.start()
+        try:
+            for _ in range(200):
+                if leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            assert leader.is_leader
+        finally:
+            await leader.stop()
+    errors = _errors(caplog)
+    assert len(errors) == 1
+    assert errors[0].startswith("scheduler leader tick failed: (builtins.Exception) server closed the connection")
 
 
 @pytest.mark.asyncio
@@ -223,3 +236,65 @@ def test_postgres_url_gets_advisory_lock(monkeypatch):
     lock = make_leader()._lock  # builds an engine; connects only on try_acquire
     assert isinstance(lock, PgAdvisoryLock) and lock.backend_pid() is None
     assert leader_module.SCHEDULER_LEADER_INTERVAL_SECONDS == 30
+
+
+class BlockingPingLock(FakeLock):
+    """ping() blocks its thread until `unblock` is set (a half-open socket)."""
+
+    def __init__(self, events):
+        super().__init__(events=events)
+        self.unblock = threading.Event()
+        self.ping_returned = threading.Event()
+
+    def ping(self) -> bool:
+        self.unblock.wait(timeout=10)
+        self.ping_returned.set()
+        return True
+
+
+async def _wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stuck_ping_demotes_and_releases_only_after_it_returns():
+    events = []
+    lock = BlockingPingLock(events)
+    factory = Factory(events)
+    leader = SchedulerLeader(lock, scheduler_factory=factory, call_timeout=0.05)
+    try:
+        await leader.tick()  # acquire
+        await leader.tick()  # ping hangs past call_timeout
+        assert not leader.is_leader and factory.built[0].shutdown_calls == [False]
+        await leader.tick()  # ping still stuck: the connection is left alone
+        assert events == ["shutdown"] and len(factory.calls) == 1
+    finally:
+        lock.unblock.set()
+    await asyncio.to_thread(lock.ping_returned.wait, 2)
+    await _wait_for(lambda: leader._inflight.done())
+    await leader.tick()  # the stuck call returned: release, then race for the lock again
+    assert events == ["shutdown", "release"]
+    assert leader.is_leader and len(factory.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_gives_up_on_a_stuck_tick_without_releasing(monkeypatch):
+    monkeypatch.setattr(leader_module, "_STOP_WAIT_SECONDS", 0.2)
+    events = []
+    lock = BlockingPingLock(events)
+    # call_timeout far above the stop wait: the loop task itself is stuck in the ping
+    leader = SchedulerLeader(lock, scheduler_factory=Factory(events), interval=0.01, call_timeout=60)
+    await leader.start()
+    try:
+        await _wait_for(lambda: leader.is_leader)
+        await asyncio.sleep(0.05)  # the second tick is now blocked in ping()
+        started = time.monotonic()
+        await leader.stop()
+        assert time.monotonic() - started < 2
+        assert events == ["shutdown"] and not leader.is_leader  # release never called
+    finally:
+        lock.unblock.set()
+        await asyncio.to_thread(lock.ping_returned.wait, 2)

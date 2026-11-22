@@ -26,10 +26,30 @@ logger = logging.getLogger(__name__)
 
 SCHEDULER_LEADER_INTERVAL_SECONDS = 30
 LEADER_HEARTBEAT = "scheduler_leader"
+# Longest a lock or heartbeat call may block a tick (asyncio backstop to the
+# TCP bounds below); a slow ping demotes the leader.
+LOCK_CALL_TIMEOUT_SECONDS = 10.0
 # How long stop() waits for an in-flight tick before giving up on it.
 _STOP_WAIT_SECONDS = 5.0
 
-_KEEPALIVES = {"keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3}
+# Split-brain invariant: the leader must stop its scheduler BEFORE Postgres
+# frees the lock, so the client bound must stay shorter than the server bound.
+# - Client: a ping fails within LOCK_CALL_TIMEOUT_SECONDS (asyncio) and libpq's
+#   tcp_user_timeout (20 s of unacknowledged data; keepalives only cover an
+#   idle socket, and without it an in-flight query retransmits for ~15 min).
+# - Server: this session is freed no sooner than the 30 s keepalive idle plus
+#   probes after the last packet it got, bounded by tcp_user_timeout 60 s.
+_CLIENT_TCP = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 20000,  # ms
+}
+_SERVER_TCP = (  # per-session server settings for the lock connection only
+    "-c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10 "
+    "-c tcp_keepalives_count=3 -c tcp_user_timeout=60000"
+)
 
 
 class LeaderLock(Protocol):
@@ -45,7 +65,9 @@ class PgAdvisoryLock:
 
     def __init__(self, database_url: str, key: int = SCHEDULER_LOCK_KEY):
         self._key = int(key)
-        self._engine = create_engine(database_url, poolclass=NullPool, connect_args=_KEEPALIVES)
+        self._engine = create_engine(
+            database_url, poolclass=NullPool, connect_args={**_CLIENT_TCP, "options": _SERVER_TCP}
+        )
         self._conn: Connection | None = None
         self._pid: int | None = None
 
@@ -117,7 +139,11 @@ def _default_scheduler_factory(startup_at=None):
 
 
 class SchedulerLeader:
-    """Leader loop. Lock and heartbeat calls block, so they run in a thread."""
+    """Leader loop. Lock and heartbeat calls block, so they run in a thread,
+    each bounded by `call_timeout`. A lock call that times out is left to
+    finish in its thread (the lock connection is never used from two threads):
+    the leader demotes at once, and the connection is released only after that
+    call has returned."""
 
     def __init__(
         self,
@@ -125,12 +151,15 @@ class SchedulerLeader:
         scheduler_factory: Callable | None = None,
         interval: float = SCHEDULER_LEADER_INTERVAL_SECONDS,
         startup_delay: float = 15,
+        call_timeout: float = LOCK_CALL_TIMEOUT_SECONDS,
     ):
         self._lock = lock
         self._scheduler_factory = scheduler_factory or _default_scheduler_factory
         self._interval = interval
         self._startup_delay = startup_delay
+        self._call_timeout = call_timeout
         self._scheduler = None
+        self._inflight: asyncio.Future | None = None  # a timed-out lock call, still running
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -141,6 +170,10 @@ class SchedulerLeader:
     async def tick(self) -> None:
         """One election step. Never raises: errors are logged and retried next tick."""
         try:
+            if self._inflight is not None:
+                if self._lock_busy():
+                    return  # still stuck: leave the connection alone
+                await self._release_quietly()  # a late acquire may hold the lock; start clean
             if self._scheduler is None:
                 await self._follower_step()
             else:
@@ -149,7 +182,7 @@ class SchedulerLeader:
             logger.error("scheduler leader tick failed: %s", redact_secrets(e))
 
     async def _follower_step(self) -> None:
-        if not await asyncio.to_thread(self._lock.try_acquire):
+        if not await self._lock_call(self._lock.try_acquire):
             return
         try:
             startup_at = datetime.now(timezone.utc) + timedelta(seconds=self._startup_delay)
@@ -161,13 +194,11 @@ class SchedulerLeader:
             raise
         self._scheduler = scheduler
         logger.info("scheduler leader: acquired the lock, scheduler started")
-        await asyncio.to_thread(
-            heartbeat.upsert_heartbeat, LEADER_HEARTBEAT, last_started_at=datetime.now(timezone.utc)
-        )
+        await self._stamp(last_started_at=datetime.now(timezone.utc))
 
     async def _leader_step(self) -> None:
         try:
-            alive = await asyncio.to_thread(self._lock.ping)
+            alive = await self._lock_call(self._lock.ping)
         except Exception as e:  # noqa: BLE001
             logger.warning("scheduler leader: lock ping failed: %s", redact_secrets(e))
             alive = False
@@ -176,9 +207,38 @@ class SchedulerLeader:
             logger.warning("scheduler leader: lost the lock, scheduler stopped")
             await self._release_quietly()  # drop the connection; reconnect as a follower
             return
-        await asyncio.to_thread(
-            heartbeat.upsert_heartbeat, LEADER_HEARTBEAT, last_success_at=datetime.now(timezone.utc)
+        await self._stamp(last_success_at=datetime.now(timezone.utc))
+
+    async def _stamp(self, **fields) -> None:
+        # Own session; on timeout the abandoned thread can finish harmlessly.
+        await asyncio.wait_for(
+            asyncio.to_thread(heartbeat.upsert_heartbeat, LEADER_HEARTBEAT, **fields),
+            timeout=self._call_timeout,
         )
+
+    async def _lock_call(self, fn):
+        """`fn()` in a thread, waiting at most call_timeout. On timeout the call
+        keeps running and is recorded in `_inflight`, and TimeoutError is raised."""
+        fut = asyncio.ensure_future(asyncio.to_thread(fn))
+        self._inflight = fut
+        done, _ = await asyncio.wait({fut}, timeout=self._call_timeout)
+        if not done:
+            raise TimeoutError(f"lock call {fn.__name__} took over {self._call_timeout}s")
+        self._inflight = None
+        return fut.result()
+
+    def _lock_busy(self) -> bool:
+        """True while a timed-out lock call still runs; once it has finished,
+        forget it (its outcome was already handled as a timeout)."""
+        fut = self._inflight
+        if fut is None:
+            return False
+        if not fut.done():
+            return True
+        if not fut.cancelled():
+            fut.exception()  # mark retrieved
+        self._inflight = None
+        return False
 
     def _shutdown_scheduler(self) -> None:
         scheduler, self._scheduler = self._scheduler, None
@@ -190,8 +250,10 @@ class SchedulerLeader:
             logger.error("scheduler shutdown failed: %s", redact_secrets(e))
 
     async def _release_quietly(self) -> None:
+        if self._lock_busy():
+            return  # released once the stuck call returns (next tick, or never if stopping)
         try:
-            await asyncio.to_thread(self._lock.release)
+            await self._lock_call(self._lock.release)
         except Exception as e:  # noqa: BLE001
             logger.warning("scheduler leader: lock release failed: %s", redact_secrets(e))
 
@@ -216,14 +278,14 @@ class SchedulerLeader:
         if task is not None:
             done, _ = await asyncio.wait({task}, timeout=_STOP_WAIT_SECONDS)
             if not done:
-                # A tick is stuck in a lock call on the lock connection; don't
-                # touch that connection from another thread. The process is
-                # exiting and its closing socket frees the lock.
                 task.cancel()
-                self._shutdown_scheduler()
-                logger.warning("scheduler leader: stop timed out; lock left to the closing session")
-                return
         self._shutdown_scheduler()
+        if self._lock_busy():
+            # A lock call is stuck on the lock connection; don't touch it from
+            # another thread. The process is exiting and its closing socket
+            # frees the lock.
+            logger.warning("scheduler leader: lock call stuck at stop; lock left to the closing session")
+            return
         await self._release_quietly()
 
 

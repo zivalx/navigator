@@ -97,3 +97,27 @@ def test_pg_upsert_heartbeat_updates_only_given_fields(monkeypatch):
         with Session() as s:
             hb = s.get(JobHeartbeat, "scheduler_leader")
             assert (hb.last_started_at, hb.last_success_at, hb.last_error_at) == (t1, t2, None)
+
+
+@requires_pg
+def test_pg_lock_connection_has_tcp_bounds():
+    """Server bound (keepalives, 60 s user timeout) longer than the client's
+    20 s tcp_user_timeout: the leader demotes before Postgres frees the lock."""
+    lock = PgAdvisoryLock(os.environ["TEST_POSTGRES_URL"])
+    try:
+        assert lock.try_acquire()
+        conn = lock._conn
+        server = dict(conn.exec_driver_sql(
+            "SELECT name, setting FROM pg_settings WHERE name IN "
+            "('tcp_keepalives_idle', 'tcp_keepalives_interval', 'tcp_keepalives_count', 'tcp_user_timeout')"
+        ).all())
+        assert server == {
+            "tcp_keepalives_idle": "30",
+            "tcp_keepalives_interval": "10",
+            "tcp_keepalives_count": "3",
+            "tcp_user_timeout": "60000",
+        }
+        client = conn.connection.dbapi_connection.get_dsn_parameters()
+        assert client["tcp_user_timeout"] == "20000" and client["keepalives_idle"] == "30"
+    finally:
+        lock.release()
