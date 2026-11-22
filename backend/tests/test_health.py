@@ -252,7 +252,7 @@ def test_price_detail_counts(db_session):
     snap(db_session, a)
     asset(db_session, "FUND", atype=AssetType.FUND)
     c = deep_checks(db_session, NOW)["prices_us"]
-    assert c.detail == "1 of 2 watched assets without a fresh price for 30+ min; 1 not_monitored"
+    assert c.detail == "1 of 2 watched assets without a fresh price for 45+ min; 1 not_monitored"
 
 
 def test_db_unreachable_skips_rest(db_session, monkeypatch):
@@ -415,3 +415,44 @@ def test_pg_non_leader_worker_reads_lock_from_pg_locks():
             assert hs._check_leader(db, NOW, hbs) == Check(False, "no leader lock held")
             with advisory_lock(engine, SCHEDULER_LOCK_KEY):  # another process holds it
                 assert hs._check_leader(db, NOW, hbs).ok
+
+
+# ---------------------------------------------------------------------------
+# thresholds scale with the polling interval (3 polls)
+# ---------------------------------------------------------------------------
+
+def test_poll_limits_are_three_intervals():
+    from app.services.health import poll_limits
+
+    limits = poll_limits(10, 20)
+    assert limits["quote_refresh"] == (timedelta(minutes=30), True)
+    assert limits["price_alert_evaluation"] == (timedelta(minutes=60), True)
+
+
+def test_default_limits_follow_the_configured_15_min_cadence():
+    from app.config import settings
+    from app.services.health import PRICE_FRESH_FOR
+
+    assert settings.quote_refresh_interval_minutes == 15
+    assert settings.alert_evaluation_interval_minutes == 15
+    assert JOB_LIMITS["quote_refresh"][0] == timedelta(minutes=45)
+    assert JOB_LIMITS["price_alert_evaluation"][0] == timedelta(minutes=45)
+    assert PRICE_FRESH_FOR == timedelta(minutes=45)
+
+
+@pytest.mark.parametrize("age_min,ok", [(40, True), (50, False)])
+def test_quote_age_against_45_min_freshness(db_session, age_min, ok):
+    healthy(db_session)
+    snap(db_session, us(db_session), at=NOW - timedelta(minutes=age_min))
+    check = deep_checks(db_session, NOW)["prices_us"]
+    assert check.ok is ok
+    if not ok:
+        assert "without a fresh price for 45+ min" in check.detail
+
+
+@pytest.mark.parametrize("age_min,ok", [(40, True), (50, False)])
+def test_poll_job_overdue_after_three_intervals(db_session, age_min, ok):
+    healthy(db_session)
+    hb(db_session, "quote_refresh", started=NOW - timedelta(minutes=age_min),
+       success=NOW - timedelta(minutes=age_min))
+    assert deep_checks(db_session, NOW)["job_quote_refresh"].ok is ok

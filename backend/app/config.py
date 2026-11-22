@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from typing import List
 
@@ -11,6 +12,10 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:7070,http://localhost:3000,http://localhost:3002"
     # false: this process runs no scheduler leader loop (scripts, a laptop on a shared DB)
     scheduler_enabled: bool = True
+
+    # Scheduler cadence (minutes); health thresholds are 3x these
+    quote_refresh_interval_minutes: int = Field(15, ge=1)
+    alert_evaluation_interval_minutes: int = Field(15, ge=1)
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/navigator"

@@ -178,12 +178,40 @@ async def test_quote_refresh_job_registered():
         evaluate = sched.get_job("price_alert_evaluation")
     finally:
         sched.shutdown(wait=False)
-    assert refresh.trigger.interval == timedelta(minutes=5)
+    assert refresh.trigger.interval == timedelta(minutes=15)
     assert refresh.misfire_grace_time == 120
     assert refresh.func.__heartbeat_name__ == "quote_refresh"
     gap = evaluate.next_run_time - refresh.next_run_time
-    assert evaluate.trigger.interval == timedelta(minutes=5)
-    assert timedelta(seconds=-290) < gap < timedelta(seconds=-250)  # first eval at +30 s
+    assert evaluate.trigger.interval == timedelta(minutes=15)
+    assert timedelta(seconds=-890) < gap < timedelta(seconds=-850)  # first eval at +30 s
+
+
+@pytest.mark.asyncio
+async def test_jobs_use_the_configured_intervals(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "quote_refresh_interval_minutes", 7)
+    monkeypatch.setattr(settings, "alert_evaluation_interval_minutes", 9)
+    sched = build_scheduler()
+    sched.start(paused=True)
+    try:
+        refresh = sched.get_job("quote_refresh")
+        evaluate = sched.get_job("price_alert_evaluation")
+    finally:
+        sched.shutdown(wait=False)
+    assert refresh.trigger.interval == timedelta(minutes=7)
+    assert evaluate.trigger.interval == timedelta(minutes=9)
+
+
+def test_interval_settings_reject_zero():
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(quote_refresh_interval_minutes=0)
+    with pytest.raises(ValidationError):
+        Settings(alert_evaluation_interval_minutes=0)
 
 
 @pytest.mark.asyncio

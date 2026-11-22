@@ -14,6 +14,7 @@ from typing import Callable, Literal, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..locks import SCHEDULER_LOCK_KEY
 from ..models.alert import PriceAlert
 from ..models.asset import Asset
@@ -42,10 +43,20 @@ class Check:
     critical: bool = True
 
 
+POLLS_TOLERATED = 3  # a poll job is overdue after this many missed intervals
+
+
+def poll_limits(quote_minutes: int, alert_minutes: int) -> dict[str, tuple[timedelta, bool]]:
+    """Overdue thresholds of the two interval jobs: 3 x their interval."""
+    return {
+        "quote_refresh": (timedelta(minutes=POLLS_TOLERATED * quote_minutes), True),
+        "price_alert_evaluation": (timedelta(minutes=POLLS_TOLERATED * alert_minutes), True),
+    }
+
+
 # job name -> (overdue threshold, critical)
 JOB_LIMITS: dict[str, tuple[timedelta, bool]] = {
-    "quote_refresh": (timedelta(minutes=15), True),
-    "price_alert_evaluation": (timedelta(minutes=15), True),
+    **poll_limits(settings.quote_refresh_interval_minutes, settings.alert_evaluation_interval_minutes),
     "eod_snapshot": (timedelta(hours=26), True),
     "eod_catchup": (timedelta(hours=26), True),
     "breadth_snapshot": (timedelta(hours=26), False),
@@ -54,7 +65,7 @@ LEADER_LIMIT = timedelta(minutes=3)
 LEADER_JOB = "scheduler_leader"
 
 ALERT_DELIVERY_LIMIT = timedelta(minutes=15)
-PRICE_FRESH_FOR = timedelta(minutes=30)
+PRICE_FRESH_FOR = timedelta(minutes=POLLS_TOLERATED * settings.quote_refresh_interval_minutes)
 OPEN_GRACE = timedelta(minutes=15)
 FRESH_SOURCES = frozenset().union(*ALERTABLE_SOURCES.values())
 SKIPPED = "skipped: db unreachable"
