@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
+from ..config import settings
 from ..database import SessionLocal
 from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
@@ -25,6 +27,7 @@ from ..services.sessions import (
     classify,
     is_alertable,
     is_in_session,
+    latest_session_close,
     session_bounds,
     trade_date_for,
     watched_assets,
@@ -56,8 +59,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def snapshot_eod_prices() -> None:
-    """Take end-of-day price snapshots for all held assets."""
+async def snapshot_eod_prices(only_closed: bool = False) -> None:
+    """Take end-of-day price snapshots for all held assets. With `only_closed`
+    (the startup run, which can fall anywhere in the day) an asset is written
+    only if its own exchange is closed and the quote is from at/after that
+    exchange's latest close; always-open exchanges (crypto, other) are
+    written as usual."""
     db = SessionLocal()
     try:
         asset_ids = (
@@ -94,6 +101,16 @@ async def snapshot_eod_prices() -> None:
                 if quote_ts is None:
                     skipped[reason] += 1
                     continue
+                if only_closed:
+                    exchange = classify(asset)
+                    if exchange in SESSION_TABLE:
+                        if is_in_session(exchange, now):
+                            skipped["exchange_open"] += 1
+                            continue
+                        close = latest_session_close(exchange, now)
+                        if close is None or quote_ts < close:
+                            skipped["before_close"] += 1
+                            continue
                 dated = {**quote, "marketTime": quote_ts}
                 upsert_eod(
                     db,
@@ -140,7 +157,13 @@ async def snapshot_eod_prices() -> None:
                 )
             else:
                 svc = PortfolioService(db, base_currency=Currency.USD)
-                await svc.compute_daily_snapshot(today)
+                try:
+                    await svc.compute_daily_snapshot(today)
+                except IntegrityError:
+                    # the startup run and the 16:30 cron overlapped: the other
+                    # one stored today's row first
+                    db.rollback()
+                    logger.info("EOD snapshot: portfolio row for %s already written", today)
         except Exception as e:
             portfolio_failed = True
             logger.warning("Daily portfolio snapshot failed: %s", redact_secrets(e))
@@ -262,6 +285,13 @@ async def _catchup_asset(
     )
     if response.status_code == 404:
         return None
+    if 400 <= response.status_code < 500:
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = None
+        if isinstance(error_body, dict) and (error_body.get("chart") or {}).get("error"):
+            return None  # Yahoo says it has no such symbol
     response.raise_for_status()
     chart = response.json().get("chart") or {}
     result = chart.get("result")
@@ -668,7 +698,7 @@ async def quote_refresh() -> None:
     db = SessionLocal()
     try:
         # Only types with a live alert source: funds have none (not_monitored),
-        # so fetching them every 5 minutes would be wasted calls.
+        # so fetching them every poll would be wasted calls.
         assets = [
             a for a in watched_assets(db)
             if a.asset_type.value in ALERTABLE_SOURCES and is_in_session(classify(a), now)
@@ -809,7 +839,10 @@ async def eod_snapshot_if_missed() -> None:
         db.close()
     if missed:
         logger.info("leader_startup: eod_snapshot slot was missed, running it now")
-        await heartbeat("eod_snapshot")(snapshot_eod_prices)()
+        async def startup_snapshot() -> None:
+            await snapshot_eod_prices(only_closed=True)
+
+        await heartbeat("eod_snapshot")(startup_snapshot)()
 
 
 async def leader_startup() -> None:
@@ -869,21 +902,21 @@ def build_scheduler(startup_at: datetime | None = None) -> AsyncIOScheduler:
         misfire_grace_time=DAILY_MISFIRE_SECONDS,
     )
 
-    # Quote refresh every 5 minutes (default misfire grace, 120 s).
+    # Quote refresh every quote_refresh_interval_minutes (default misfire grace, 120 s).
     scheduler.add_job(
         heartbeat("quote_refresh")(quote_refresh),
         "interval",
-        minutes=5,
+        minutes=settings.quote_refresh_interval_minutes,
         id="quote_refresh",
         name="Quote Refresh",
     )
 
-    # Price alert evaluation every 5 minutes, 30 s after the refresh so it
-    # rides the 60 s quote cache.
+    # Price alert evaluation every alert_evaluation_interval_minutes, 30 s after
+    # the refresh so it rides the 60 s quote cache.
     scheduler.add_job(
         heartbeat("price_alert_evaluation")(evaluate_price_alerts),
         "interval",
-        minutes=5,
+        minutes=settings.alert_evaluation_interval_minutes,
         start_date=_utcnow() + timedelta(seconds=30),
         id="price_alert_evaluation",
         name="Price Alert Evaluation",

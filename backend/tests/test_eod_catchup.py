@@ -652,6 +652,14 @@ async def test_asset_bought_after_the_day_does_not_block_it(db_session, env, mon
 # leader_startup runs a missed 16:30 eod_snapshot (I3)
 # ---------------------------------------------------------------------------
 
+class _Calls(list):
+    modes: list
+
+    def __init__(self):
+        super().__init__()
+        self.modes = []
+
+
 def _startup(monkeypatch, db_session, now, last_success):
     maker = sessionmaker(bind=db_session.get_bind())
     monkeypatch.setattr(leader, "is_leader", lambda: True)
@@ -660,10 +668,11 @@ def _startup(monkeypatch, db_session, now, last_success):
     monkeypatch.setattr(scheduler_module, "_utcnow", lambda: now)
     if last_success is not None:
         heartbeat_module.upsert_heartbeat("eod_snapshot", last_success_at=last_success)
-    calls = []
+    calls = _Calls()
 
-    async def snapshot():
+    async def snapshot(only_closed=False):
         calls.append("eod_snapshot")
+        calls.modes.append(only_closed)
 
     async def noop():
         return None
@@ -684,6 +693,7 @@ async def test_startup_runs_missed_eod_snapshot_after_close(db_session, monkeypa
     calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=_ny(17, 16, 35))
     await scheduler_module.leader_startup()
     assert calls == ["eod_snapshot"]
+    assert calls.modes == [True]  # the startup run only writes closed exchanges
     db_session.expire_all()
     from app.models.job_heartbeat import JobHeartbeat
     assert db_session.query(JobHeartbeat).filter_by(job_name="eod_snapshot").one().last_success_at is not None
@@ -732,3 +742,200 @@ async def test_startup_runs_eod_snapshot_when_it_never_succeeded(db_session, mon
     calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=None)
     await scheduler_module.leader_startup()
     assert calls == ["eod_snapshot"]
+
+
+# ---------------------------------------------------------------------------
+# Task 14: startup snapshot writes only exchanges that are closed
+# ---------------------------------------------------------------------------
+
+TUE_0500_NY = datetime(2026, 11, 17, 10, 0, tzinfo=timezone.utc)   # TASE 12:00 IST: open
+FRI_1200_NY = datetime(2026, 11, 20, 17, 0, tzinfo=timezone.utc)   # US open, TASE closed since 14:00 IST
+FRI_1800_NY = datetime(2026, 11, 20, 23, 0, tzinfo=timezone.utc)   # both closed
+MON_CLOSE_US = datetime(2026, 11, 16, 21, 0, tzinfo=timezone.utc)
+FRI_CLOSE_TASE = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def _tase(db, symbol="TEVA.TA"):
+    return _hold(db, symbol=symbol, currency=Currency.ILS, market_region=MarketRegion.IL, exchange="TASE")
+
+
+def _quotes_at(monkeypatch, times):
+    """symbol -> marketTime of that symbol's (otherwise healthy) quote."""
+    from app.services.market_data import MarketDataService
+
+    async def get_quote(self, symbol, asset_type=None):
+        return {"price": 10.0, "currency": "ILS" if symbol.endswith(".TA") else "USD",
+                "source": "yahoo", "marketTime": times[symbol].isoformat()}
+
+    monkeypatch.setattr(MarketDataService, "get_quote", get_quote)
+    _record_computed(monkeypatch)  # no FX needed for the portfolio roll-up
+
+
+def _written(db):
+    db.expire_all()
+    rows = db.query(PriceSnapshot).filter(PriceSnapshot.trade_date.isnot(None)).all()
+    return {r.asset.symbol: r.trade_date for r in rows}
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_skips_tase_during_tase_hours_but_writes_us(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA"), _tase(db_session)
+    env["now"] = TUE_0500_NY
+    _quotes_at(monkeypatch, {"AAA": MON_CLOSE_US, "TEVA.TA": TUE_0500_NY})  # TASE: intraday quote
+    await snapshot_eod_prices(only_closed=True)
+    assert _written(db_session) == {"AAA": MON}
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_writes_tase_once_it_has_closed(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA"), _tase(db_session), _tase(db_session, "EARLY.TA")
+    env["now"] = FRI_1800_NY
+    _quotes_at(monkeypatch, {
+        "AAA": FRI_AFTER_CLOSE.replace(hour=21), "TEVA.TA": FRI_CLOSE_TASE,
+        "EARLY.TA": FRI_CLOSE_TASE - timedelta(hours=1),  # quote predates the close
+    })
+    await snapshot_eod_prices(only_closed=True)
+    assert _written(db_session) == {"AAA": FRI, "TEVA.TA": FRI}
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_with_us_open_writes_the_closed_tase_row_only(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA"), _tase(db_session)
+    env["now"] = FRI_1200_NY
+    _quotes_at(monkeypatch, {"AAA": FRI_1200_NY, "TEVA.TA": FRI_CLOSE_TASE})
+    await snapshot_eod_prices(only_closed=True)
+    assert _written(db_session) == {"TEVA.TA": FRI}
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_still_writes_crypto_and_other(db_session, env, monkeypatch):
+    from app.models.asset import AssetType
+    from app.services.market_data import MarketDataService
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    btc = _hold(db_session, symbol="BTC")
+    btc.asset_type = AssetType.CRYPTO
+    _hold(db_session, symbol="XYZ", market_region=MarketRegion.EU)
+    db_session.commit()
+    env["now"] = TUE_0500_NY
+
+    async def get_quote(self, symbol, asset_type=None):
+        return {"price": 10.0, "currency": "USD", "source": "yahoo",
+                "marketTime": TUE_0500_NY.isoformat()}
+
+    monkeypatch.setattr(MarketDataService, "get_quote", get_quote)
+    _record_computed(monkeypatch)
+    await snapshot_eod_prices(only_closed=True)
+    assert set(_written(db_session)) == {"BTC", "XYZ"}
+
+
+@pytest.mark.asyncio
+async def test_cron_snapshot_still_writes_tase_as_before(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA"), _tase(db_session)
+    env["now"] = TUE_0500_NY
+    _quotes_at(monkeypatch, {"AAA": MON_CLOSE_US, "TEVA.TA": TUE_0500_NY})
+    await snapshot_eod_prices()
+    assert _written(db_session) == {"AAA": MON, "TEVA.TA": TUE}
+
+
+@pytest.mark.asyncio
+async def test_startup_runs_snapshot_in_only_closed_mode(db_session, monkeypatch):
+    calls = _startup(monkeypatch, db_session, _ny(18, 18), last_success=None)
+    await scheduler_module.leader_startup()
+    assert calls == ["eod_snapshot"] and calls.modes == [True]
+
+
+# ---------------------------------------------------------------------------
+# Task 14: residual minors
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fill_earlier_creates_a_day_the_30_day_window_cannot_reach(db_session, env):
+    from app.tasks.scheduler import _portfolio_catchup, _portfolio_fill_earlier
+
+    env["now"] = FRI_AFTER_CLOSE
+    asset = _hold(db_session)
+    OCT5, OCT6 = date(2026, 10, 5), date(2026, 10, 6)  # > 30 days before the stored row below
+    db_session.query(HoldingLot).one().purchase_date = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    for day in (OCT5, OCT6, MON):
+        _eod_row(db_session, asset, day, price=100.0)
+    db_session.add(PortfolioSnapshot(
+        id=str(uuid.uuid4()), date=MON, nav=999.0, net_flow=7.0, daily_pnl=5.0, daily_pnl_pct=1.0,
+    ))
+    db_session.commit()
+
+    # the recent-window catch-up cannot create the October days ...
+    await _portfolio_catchup(db_session, [asset.id], set(), FRI_AFTER_CLOSE)
+    assert {r.date for r in db_session.query(PortfolioSnapshot)} == {MON}
+    # ... only the earlier-days fill can
+    assert await _portfolio_fill_earlier(db_session, [asset.id]) == 2
+    db_session.expire_all()
+    rows = {r.date: r for r in db_session.query(PortfolioSnapshot)}
+    assert set(rows) == {OCT5, OCT6, MON}
+    assert (rows[MON].nav, rows[MON].net_flow, rows[MON].daily_pnl) == (999.0, 7.0, 5.0)
+
+
+@pytest.mark.asyncio
+async def test_backfill_with_since_alone_is_insert_only(db_session):
+    from app.tasks.scheduler import PortfolioService as Svc
+
+    asset = _hold(db_session)
+    db_session.query(HoldingLot).one().purchase_date = datetime(2026, 11, 16, tzinfo=timezone.utc)
+    for day in (MON, TUE, WED):
+        _eod_row(db_session, asset, day, price=100.0)
+    db_session.add(PortfolioSnapshot(id=str(uuid.uuid4()), date=TUE, nav=999.0))
+    db_session.commit()
+    written = await Svc(db_session, base_currency=Currency.USD).backfill_daily_snapshots(since=MON)
+    db_session.expire_all()
+    rows = {r.date: r for r in db_session.query(PortfolioSnapshot)}
+    assert written == 2 and set(rows) == {MON, TUE, WED}
+    assert rows[TUE].nav == 999.0
+
+
+@pytest.mark.asyncio
+async def test_catchup_http_400_with_chart_error_is_no_data(db_session, env):
+    _hold(db_session)
+    env["handler"] = lambda r: httpx.Response(
+        400, json={"chart": {"result": None, "error": {"code": "Bad Request", "description": "Invalid input"}}}
+    )
+    await eod_catchup()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_catchup_http_400_without_chart_error_still_fails(db_session, env):
+    _hold(db_session)
+    env["handler"] = lambda r: httpx.Response(400, json={"message": "nope"})
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await eod_catchup()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_row_conflict_with_overlapping_run_is_not_a_failure(
+    db_session, env, monkeypatch, caplog
+):
+    import logging
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA")
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch)
+
+    async def conflict(self, day):
+        raise IntegrityError("INSERT INTO portfolio_snapshots", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(PortfolioService, "compute_daily_snapshot", conflict)
+    with caplog.at_level(logging.INFO, logger=scheduler_module.logger.name):
+        await snapshot_eod_prices()  # must not raise
+    assert "already written" in caplog.text
+    assert "Daily portfolio snapshot failed" not in caplog.text

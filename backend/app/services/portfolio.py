@@ -682,7 +682,7 @@ class PortfolioService:
     ) -> int:
         """Build the daily series from every distinct date that has price
         snapshots, oldest first. Idempotent (compute_daily_snapshot upserts).
-        With `before`/`since` only dates in [since, before) are built, and
+        With `before` and/or `since` only dates in [since, before) are built, and
         insert-only: an existing row is never rewritten. Returns rows written."""
         date_rows = (
             self.db.query(func.date(PriceSnapshot.timestamp))
@@ -704,7 +704,7 @@ class PortfolioService:
                 continue
             if since is not None and day < since:
                 continue
-            row = await self.compute_daily_snapshot(day, insert_only=before is not None)
+            row = await self.compute_daily_snapshot(day, insert_only=before is not None or since is not None)
             if row is not None:
                 written += 1
         return written

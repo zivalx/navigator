@@ -98,6 +98,21 @@ def latest_session_open(exchange: str, now: datetime) -> Optional[datetime]:
     return None
 
 
+def latest_session_close(exchange: str, now: datetime) -> Optional[datetime]:
+    """Close of the most recent session that has already ended at `now` (walks
+    back <= 7 days); None for exchanges without a table entry."""
+    entry = SESSION_TABLE.get(exchange)
+    if entry is None:
+        return None
+    now = _aware(now)
+    local_day = now.astimezone(ZoneInfo(entry[0])).date()
+    for back in range(8):
+        bounds = session_bounds(exchange, local_day - timedelta(days=back))
+        if bounds is not None and bounds[1] <= now:
+            return bounds[1]
+    return None
+
+
 def parse_market_time(value) -> Optional[datetime]:
     if not value:
         return None
