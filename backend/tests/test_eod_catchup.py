@@ -278,3 +278,130 @@ def test_eod_catchup_job_registered():
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert fields["hour"] == "17" and fields["minute"] == "15"
     assert str(job.trigger.timezone) == "America/New_York"
+
+
+def _record_computed(monkeypatch):
+    computed = []
+
+    async def fake(self, day):
+        computed.append(day)
+
+    monkeypatch.setattr(PortfolioService, "compute_daily_snapshot", fake)
+    return computed
+
+
+def _portfolio_row(db, day):
+    db.add(PortfolioSnapshot(id=str(uuid.uuid4()), date=day, nav=1.0))
+    db.commit()
+
+
+@pytest.mark.asyncio
+async def test_catchup_waits_for_every_priceable_asset(db_session, env, monkeypatch):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    a, b = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="BBB")
+    _eod_row(db_session, a, THU)
+    _eod_row(db_session, a, FRI)
+    _eod_row(db_session, b, THU)  # BBB is priceable but has no Friday row yet
+    _portfolio_row(db_session, THU)
+    computed = _record_computed(monkeypatch)
+    await eod_catchup()
+    assert computed == []
+    _eod_row(db_session, b, FRI)  # a later run fills the missing bar
+    await eod_catchup()
+    assert computed == [FRI]
+
+
+@pytest.mark.asyncio
+async def test_catchup_never_priceable_asset_does_not_block(db_session, env, monkeypatch):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    a, _unpriceable = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="NEW")
+    _eod_row(db_session, a, THU)
+    _eod_row(db_session, a, FRI)
+    _portfolio_row(db_session, THU)
+    computed = _record_computed(monkeypatch)
+    await eod_catchup()
+    assert computed == [FRI]
+
+
+@pytest.mark.asyncio
+async def test_catchup_failed_asset_blocks_its_days(db_session, env, monkeypatch):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    a, b = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="BAD")
+    for asset in (a, b):
+        _eod_row(db_session, asset, THU)
+        _eod_row(db_session, asset, FRI)
+    _portfolio_row(db_session, WED)
+    env["handler"] = lambda r: httpx.Response(500 if r.url.path.endswith("/BAD") else 200, json=_body(NY_META, []))
+    computed = _record_computed(monkeypatch)
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await eod_catchup()
+    assert computed == []
+
+
+@pytest.mark.asyncio
+async def test_catchup_one_bad_day_does_not_stop_later_days(db_session, env, monkeypatch):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    a = _hold(db_session)
+    _eod_row(db_session, a, THU)
+    _eod_row(db_session, a, FRI)
+    _portfolio_row(db_session, WED)
+    computed = []
+
+    async def flaky(self, day):
+        computed.append(day)
+        if day == THU:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(PortfolioService, "compute_daily_snapshot", flaky)
+    with pytest.raises(RuntimeError, match="1 portfolio day"):
+        await eod_catchup()
+    assert computed == [THU, FRI]
+
+
+@pytest.mark.asyncio
+async def test_catchup_conflicting_remapped_row_is_kept(db_session, env):
+    """A weekend-stamped row that migration 0002 moved to Friday keeps its price
+    and timestamp when the catch-up's Friday bar conflicts with it."""
+    asset = _hold(db_session)
+    sat = datetime(2026, 11, 21, 15, 0, tzinfo=timezone.utc)
+    db_session.add(PriceSnapshot(
+        id=str(uuid.uuid4()), asset_id=asset.id, price=50.0, currency=Currency.USD,
+        timestamp=sat, source="eod_snapshot", trade_date=FRI,
+    ))
+    db_session.commit()
+    env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, _us_bars([FRI], 999.0)))
+    await eod_catchup()
+    [row] = _rows(db_session, asset)
+    assert row.trade_date == FRI and row.price == 50.0 and row.source == "eod_snapshot"
+    assert row.timestamp.replace(tzinfo=None) == sat.replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_catchup_us_dst_transition_week(db_session, env):
+    asset = _hold(db_session)
+    env["now"] = datetime(2026, 3, 13, 22, 0, tzinfo=timezone.utc)
+    fri_est, mon_edt = date(2026, 3, 6), date(2026, 3, 9)  # DST began Sun 8 March
+    bars = [(datetime(2026, 3, 6, 14, 30, tzinfo=timezone.utc), 1.0),
+            (datetime(2026, 3, 9, 13, 30, tzinfo=timezone.utc), 2.0)]
+    env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, bars))
+    await eod_catchup()
+    rows = _rows(db_session, asset)
+    assert [r.trade_date for r in rows] == [fri_est, mon_edt]
+    stamps = [r.timestamp.replace(tzinfo=timezone.utc) for r in rows]
+    assert stamps == [datetime(2026, 3, 6, 21, 0, tzinfo=timezone.utc),
+                      datetime(2026, 3, 9, 20, 0, tzinfo=timezone.utc)]
+
+
+@pytest.mark.asyncio
+async def test_catchup_tase_trade_date_and_close(db_session, env):
+    asset = _hold(db_session, symbol="TEVA.TA", currency=Currency.ILS,
+                  exchange="TLV", market_region=MarketRegion.IL)
+    meta = {"currency": "ILS", "exchangeTimezoneName": "Asia/Jerusalem"}
+    bars = [(_utc(THU, 7, 0), 10.0), (_utc(FRI, 7, 0), 11.0)]
+    env["handler"] = lambda r: httpx.Response(200, json=_body(meta, bars))
+    await eod_catchup()
+    rows = _rows(db_session, asset)
+    assert [r.trade_date for r in rows] == [THU, FRI]
+    stamps = [r.timestamp.replace(tzinfo=timezone.utc) for r in rows]
+    assert stamps == [datetime(2026, 11, 19, 15, 25, tzinfo=timezone.utc),  # Thu 17:25 IST
+                      datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)]   # Fri 14:00 IST
