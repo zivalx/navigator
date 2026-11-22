@@ -24,7 +24,7 @@ def _compile_array_as_json_for_sqlite(element, compiler, **kw):
 
 from app.database import Base  # noqa: E402
 # Import all models so they're registered on Base.metadata before create_all.
-from app.models import asset, holding, price, watchlist, news, alert, portfolio_snapshot, maintenance  # noqa: E402,F401
+from app.models import asset, holding, price, watchlist, news, alert, portfolio_snapshot, maintenance, job_heartbeat  # noqa: E402,F401
 
 
 @pytest.fixture()
