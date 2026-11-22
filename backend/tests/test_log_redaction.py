@@ -181,3 +181,14 @@ def test_every_engine_hides_parameters():
     assert engine.hide_parameters is True
     lock = PgAdvisoryLock("postgresql://u:p@127.0.0.1:1/x")
     assert lock._engine.hide_parameters is True
+
+
+@pytest.mark.parametrize("raw,masked", [
+    ("postgresql://nav:ab/cd@h/db", "postgresql://***@h/db"),
+    ("redis://:p@ss@h", "redis://***@h"),
+    ("connect to postgresql://nav:pw@h:5432/db failed", "connect to postgresql://***@h:5432/db failed"),
+])
+def test_url_userinfo_masked_up_to_the_last_at(raw, masked):
+    text = redact_secrets(raw)
+    assert text == masked
+    assert "ab/cd" not in text and "p@ss" not in text

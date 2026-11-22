@@ -17,7 +17,8 @@ _KEY_PARAM = re.compile(
 _SQL_PARAMETERS = re.compile(
     r"\[parameters: .*?(?:\](?=\s*(?:\(Background|\Z))|\Z)", re.DOTALL
 )
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@'\"<>]+@")
+# Greedy up to the LAST "@" of the token: a password may itself hold "/" or "@".
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s'\"<>]*@")
 _REDACTED = "<redacted>"
 
 

@@ -87,7 +87,6 @@ A production-ready compose file (separate from the dev one) with:
 ### 2.2 Install Dependencies
 
 - [ ] Docker + Docker Compose
-- [ ] Certbot (if not using Cloudflare for SSL)
 
 ### 2.3 Deploy
 
