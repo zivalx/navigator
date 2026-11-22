@@ -27,7 +27,6 @@ slowapi==0.1.9
 apscheduler==3.10.4
 
 # Authentication (optional, for later)
-python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
 
