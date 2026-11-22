@@ -103,6 +103,10 @@ def _parse_market_time(value) -> Optional[datetime]:
 
 
 def is_alertable(quote: dict, asset: Asset, now: datetime) -> tuple[bool, str]:
+    atype = asset.asset_type.value if hasattr(asset.asset_type, "value") else asset.asset_type
+    allowed = ALERTABLE_SOURCES.get(atype)
+    if allowed is None:  # no live source (fund/other): never evaluated, never failing
+        return False, "not_monitored"
     if quote.get("error"):
         return False, "error"
     if quote.get("stale"):
@@ -110,10 +114,6 @@ def is_alertable(quote: dict, asset: Asset, now: datetime) -> tuple[bool, str]:
     source = quote.get("source")
     if source == "db_cache":
         return False, "db_cache"
-    atype = asset.asset_type.value if hasattr(asset.asset_type, "value") else asset.asset_type
-    allowed = ALERTABLE_SOURCES.get(atype)
-    if allowed is None:
-        return False, "not_monitored"
     if source not in allowed:
         return False, "source"
     exchange = classify(asset)

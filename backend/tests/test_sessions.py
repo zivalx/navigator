@@ -150,3 +150,18 @@ def test_trade_date_falls_back_to_table_tz_and_crypto_uses_now():
     q = {"marketTime": "2026-11-19T22:30:00+00:00"}
     assert trade_date_for(q, tase_stock, NOW) == date(2026, 11, 20)
     assert trade_date_for(q, btc, NOW) == date(2026, 11, 20)
+
+
+def test_fund_with_db_cache_or_error_is_still_not_monitored():
+    assert is_alertable({"stale": True, "source": "db_cache"}, fund, NOW) == (False, "not_monitored")
+    assert is_alertable({"error": "boom"}, fund, NOW) == (False, "not_monitored")
+
+
+def test_naive_market_time_is_treated_as_utc():
+    q = {"price": 1.0, "source": "yahoo", "marketTime": "2026-11-20T14:30:00"}
+    assert is_alertable(q, us_stock, NOW) == (True, "ok")
+
+
+def test_garbage_market_time_is_no_market_time():
+    q = {"price": 1.0, "source": "yahoo", "marketTime": "not-a-date"}
+    assert is_alertable(q, us_stock, NOW) == (False, "no_market_time")
