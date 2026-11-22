@@ -104,11 +104,13 @@ async def test_catchup_fills_three_day_gap(db_session, env):
 @pytest.mark.asyncio
 async def test_catchup_requests_period_window(db_session, env):
     asset = _hold(db_session)
+    _eod_row(db_session, asset, date(2026, 1, 5))  # old history, so the normal overlap rule applies
     _eod_row(db_session, asset, TUE)
     await eod_catchup()
     params = dict(env["requests"][0].url.params)
     assert "range" not in params and params["interval"] == "1d"
-    expected = datetime(2026, 11, 12, tzinfo=timezone.utc)  # TUE - 5 days, midnight UTC
+    # TUE - 5 days is later than today - 30 days: the 30-day reach wins, midnight UTC
+    expected = datetime(2026, 10, 21, tzinfo=timezone.utc)
     assert int(params["period1"]) == int(expected.timestamp())
     assert int(params["period2"]) == int(FRI_AFTER_CLOSE.timestamp())
 
@@ -249,9 +251,19 @@ async def test_catchup_closes_normalized(db_session, env):
 
 def test_catchup_start_rules():
     now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
-    assert _catchup_start(date(2026, 11, 19), now) == datetime(2026, 11, 14, tzinfo=timezone.utc)
-    assert _catchup_start(None, now) == now - timedelta(days=183)
-    assert _catchup_start(date(2020, 1, 1), now) == now - timedelta(days=400)
+    old = date(2025, 1, 1)  # history older than 183 days
+    # a recent last row still reaches 30 days back (the overlap alone is 5)
+    assert _catchup_start(old, date(2026, 11, 19), now) == datetime(2026, 10, 23, tzinfo=timezone.utc)
+    # a 12-day outage: last row - 5 days is later than today - 30 days
+    assert _catchup_start(old, date(2026, 11, 10), now) == datetime(2026, 10, 23, tzinfo=timezone.utc)
+    # a longer outage: last row - 5 days wins
+    assert _catchup_start(old, date(2026, 8, 1), now) == datetime(2026, 7, 27, tzinfo=timezone.utc)
+    # no rows, or history shorter than 183 days: the full 183-day window
+    assert _catchup_start(None, None, now) == now - timedelta(days=183)
+    assert _catchup_start(date(2026, 11, 20), date(2026, 11, 20), now) == now - timedelta(days=183)
+    assert _catchup_start(date(2026, 6, 1), date(2026, 11, 20), now) == now - timedelta(days=183)
+    # never earlier than 400 days
+    assert _catchup_start(date(2020, 1, 1), date(2020, 1, 1), now) == now - timedelta(days=400)
 
 
 @pytest.mark.asyncio
@@ -405,3 +417,229 @@ async def test_catchup_tase_trade_date_and_close(db_session, env):
     stamps = [r.timestamp.replace(tzinfo=timezone.utc) for r in rows]
     assert stamps == [datetime(2026, 11, 19, 15, 25, tzinfo=timezone.utc),  # Thu 17:25 IST
                       datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)]   # Fri 14:00 IST
+
+
+def _period1(env, index=0):
+    return datetime.fromtimestamp(int(dict(env["requests"][index].url.params)["period1"]), tz=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_catchup_new_holding_gets_183_day_window(db_session, env):
+    """An asset whose only row is today's (written by the 16:30 snapshot) must
+    still fetch its history."""
+    asset = _hold(db_session)
+    _eod_row(db_session, asset, FRI)
+    await eod_catchup()
+    assert _period1(env) == FRI_AFTER_CLOSE - timedelta(days=183)
+
+
+@pytest.mark.asyncio
+async def test_catchup_twelve_day_outage_reaches_thirty_days_back(db_session, env):
+    asset = _hold(db_session)
+    _eod_row(db_session, asset, date(2026, 1, 5))
+    _eod_row(db_session, asset, date(2026, 11, 6))  # last row 14 days ago
+    await eod_catchup()
+    assert _period1(env) == datetime(2026, 10, 21, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_catchup_404_is_no_data_not_failure(db_session, env, caplog):
+    gone = _hold(db_session, symbol="GONE")
+    good = _hold(db_session, symbol="GOOD")
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    for asset in (gone, good):
+        _eod_row(db_session, asset, THU)
+    _portfolio_row(db_session, THU)
+
+    def handler(request):
+        if request.url.path.endswith("/GONE"):
+            return httpx.Response(404, json={"chart": {"result": None, "error": {"code": "Not Found"}}})
+        return httpx.Response(200, json=_body(NY_META, _us_bars([FRI])))
+
+    env["handler"] = handler
+    with caplog.at_level("INFO", logger=scheduler_module.logger.name):
+        await eod_catchup()  # must not raise
+    assert [r.trade_date for r in _rows(db_session, good)] == [THU, FRI]
+    assert "GONE" not in caplog.text and gone.id in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_catchup_chart_error_body_is_no_data(db_session, env):
+    _hold(db_session, symbol="PEPE24478-USD")
+    env["handler"] = lambda r: httpx.Response(
+        200, json={"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}}
+    )
+    await eod_catchup()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_catchup_404_asset_does_not_block_portfolio_days(db_session, env, monkeypatch):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    gone, good = _hold(db_session, symbol="GONE"), _hold(db_session, symbol="GOOD")
+    for asset in (gone, good):
+        _eod_row(db_session, asset, THU)
+    _eod_row(db_session, good, FRI)  # the delisted asset never gets a Friday row
+    _portfolio_row(db_session, THU)
+    env["handler"] = lambda r: (
+        httpx.Response(404) if r.url.path.endswith("/GONE")
+        else httpx.Response(200, json=_body(NY_META, []))
+    )
+    computed = _record_computed(monkeypatch)
+    await eod_catchup()
+    assert computed == [FRI]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 503])
+async def test_catchup_throttle_and_server_errors_still_fail(db_session, env, status):
+    _hold(db_session)
+    env["handler"] = lambda r: httpx.Response(status)
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await eod_catchup()
+
+
+@pytest.mark.asyncio
+async def test_catchup_network_error_still_fails(db_session, env):
+    _hold(db_session)
+
+    def boom(request):
+        raise httpx.ConnectError("down")
+
+    env["handler"] = boom
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await eod_catchup()
+
+
+@pytest.mark.asyncio
+async def test_catchup_fills_earlier_portfolio_days_insert_only(db_session, env):
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    asset = _hold(db_session)
+    lot = db_session.query(HoldingLot).one()
+    lot.purchase_date = datetime(2026, 11, 16, tzinfo=timezone.utc)
+    db_session.commit()
+    for day in (MON, TUE, WED, THU):
+        _eod_row(db_session, asset, day, price=100.0)
+    db_session.add(PortfolioSnapshot(
+        id=str(uuid.uuid4()), date=WED, nav=999.0, net_flow=7.0, daily_pnl=5.0, daily_pnl_pct=1.0,
+    ))
+    db_session.commit()
+    await eod_catchup()
+    db_session.expire_all()
+    rows = {r.date: r for r in db_session.query(PortfolioSnapshot)}
+    assert {MON, TUE}.issubset(rows)  # earlier days filled
+    assert rows[WED].nav == 999.0 and rows[WED].net_flow == 7.0 and rows[WED].daily_pnl == 5.0  # untouched
+    assert min(rows) == MON
+
+
+@pytest.mark.asyncio
+async def test_backfill_with_bounds_never_rewrites_existing_rows(db_session):
+    from app.tasks.scheduler import PortfolioService as Svc  # the service the job uses
+
+    asset = _hold(db_session)
+    db_session.query(HoldingLot).one().purchase_date = datetime(2026, 11, 16, tzinfo=timezone.utc)
+    for day in (MON, TUE, WED):
+        _eod_row(db_session, asset, day, price=100.0)
+    db_session.add(PortfolioSnapshot(id=str(uuid.uuid4()), date=TUE, nav=999.0))
+    db_session.commit()
+    written = await Svc(db_session, base_currency=Currency.USD).backfill_daily_snapshots(before=TUE, since=MON)
+    db_session.expire_all()
+    rows = {r.date: r for r in db_session.query(PortfolioSnapshot)}
+    assert written == 1 and set(rows) == {MON, TUE}  # WED is outside the bounds
+    assert rows[TUE].nav == 999.0
+
+
+# ---------------------------------------------------------------------------
+# eod_snapshot's portfolio row follows the same coverage rule (I4)
+# ---------------------------------------------------------------------------
+
+def _quotes(monkeypatch, failing=()):
+    from app.services.market_data import MarketDataService
+
+    async def get_quote(self, symbol, asset_type=None):
+        if symbol in failing:
+            raise RuntimeError("provider down")
+        return {"price": 10.0, "currency": "USD", "source": "yahoo",
+                "marketTime": FRI_AFTER_CLOSE.replace(hour=21, minute=0).isoformat()}
+
+    monkeypatch.setattr(MarketDataService, "get_quote", get_quote)
+
+
+def _bought(db, asset, when):
+    db.query(HoldingLot).filter_by(asset_id=asset.id).one().purchase_date = when
+    db.commit()
+
+
+@pytest.mark.asyncio
+async def test_eod_snapshot_skips_portfolio_row_when_a_held_asset_failed(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    a, b = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="BAD")
+    for asset in (a, b):
+        _eod_row(db_session, asset, THU)  # both priceable
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch, failing={"BAD"})
+    computed = _record_computed(monkeypatch)
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await snapshot_eod_prices()
+    assert computed == []
+
+
+@pytest.mark.asyncio
+async def test_eod_snapshot_computes_portfolio_row_when_all_priced(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA"), _hold(db_session, symbol="BBB")
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch)
+    computed = _record_computed(monkeypatch)
+    await snapshot_eod_prices()
+    assert computed == [FRI]
+
+
+@pytest.mark.asyncio
+async def test_failed_snapshot_day_is_filled_by_next_catchup(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    a, b = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="BAD")
+    for asset in (a, b):
+        _eod_row(db_session, asset, THU)
+    _portfolio_row(db_session, THU)
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch, failing={"BAD"})
+    computed = _record_computed(monkeypatch)
+    with pytest.raises(RuntimeError):
+        await snapshot_eod_prices()
+    assert computed == []
+    # the 17:15 catch-up still has no price for BAD: the day stays open
+    env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, []))
+    await eod_catchup()
+    assert computed == []
+    # a later run brings the Friday bar in: now the day is filled
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, _us_bars([THU, FRI])))
+    await eod_catchup()
+    assert computed == [FRI]
+
+
+@pytest.mark.asyncio
+async def test_asset_bought_after_the_day_does_not_block_it(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    a, late = _hold(db_session, symbol="AAA"), _hold(db_session, symbol="NEW")
+    _eod_row(db_session, late, THU)  # priceable, but bought after Friday
+    _bought(db_session, late, datetime(2026, 11, 21, 9, 0, tzinfo=timezone.utc))
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch, failing={"NEW"})
+    computed = _record_computed(monkeypatch)
+    with pytest.raises(RuntimeError, match="1 asset"):  # NEW's own failure is still reported
+        await snapshot_eod_prices()
+    assert computed == [FRI]
+
+    # and the catch-up ignores it for Friday too
+    env["now"] = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    _portfolio_row(db_session, THU)
+    computed.clear()
+    _eod_row(db_session, a, THU)  # Friday's row came from the snapshot above
+    env["handler"] = lambda r: httpx.Response(200, json=_body(NY_META, []))
+    await eod_catchup()
+    assert computed == [FRI]

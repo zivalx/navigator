@@ -529,7 +529,9 @@ class PortfolioService:
         except Exception:
             return None
 
-    async def compute_daily_snapshot(self, day: date_cls) -> Optional[PortfolioSnapshot]:
+    async def compute_daily_snapshot(
+        self, day: date_cls, insert_only: bool = False
+    ) -> Optional[PortfolioSnapshot]:
         """Compute and upsert the portfolio_snapshots row for `day`.
 
         NAV is the USD portfolio value at end of `day`. daily_pnl is the sum of
@@ -539,7 +541,10 @@ class PortfolioService:
         then), and an asset whose price history only just begins contributes
         nothing (no prior price to diff), so uneven snapshot coverage (e.g.
         crypto-only weekend days) can't masquerade as a gain. net_flow (USD cost
-        of lots bought on `day`) is stored for reference. Idempotent."""
+        of lots bought on `day`) is stored for reference. Idempotent. With
+        `insert_only`, a day that already has a row is left alone (None)."""
+        if insert_only and self.db.query(PortfolioSnapshot.id).filter_by(date=day).first():
+            return None
         end_of_day = datetime.combine(day, dt_time(23, 59, 59), tzinfo=timezone.utc)
         holdings = self.db.query(HoldingLot).all()
 
@@ -672,9 +677,13 @@ class PortfolioService:
                 missing.add(code)
         return missing
 
-    async def backfill_daily_snapshots(self) -> int:
+    async def backfill_daily_snapshots(
+        self, before: date_cls | None = None, since: date_cls | None = None
+    ) -> int:
         """Build the daily series from every distinct date that has price
-        snapshots, oldest first. Idempotent (compute_daily_snapshot upserts)."""
+        snapshots, oldest first. Idempotent (compute_daily_snapshot upserts).
+        With `before`/`since` only dates in [since, before) are built, and
+        insert-only: an existing row is never rewritten. Returns rows written."""
         date_rows = (
             self.db.query(func.date(PriceSnapshot.timestamp))
             .distinct()
@@ -691,7 +700,11 @@ class PortfolioService:
                 day = raw_date
             else:
                 continue
-            row = await self.compute_daily_snapshot(day)
+            if before is not None and day >= before:
+                continue
+            if since is not None and day < since:
+                continue
+            row = await self.compute_daily_snapshot(day, insert_only=before is not None)
             if row is not None:
                 written += 1
         return written

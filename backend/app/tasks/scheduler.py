@@ -72,6 +72,7 @@ async def snapshot_eod_prices() -> None:
         success_count = 0
         error_count = 0
         skipped: Counter = Counter()
+        failed_ids: set[str] = set()
         portfolio_failed = False
 
         for asset_id in asset_ids:
@@ -106,8 +107,9 @@ async def snapshot_eod_prices() -> None:
             except Exception as e:
                 db.rollback()
                 error_count += 1
+                failed_ids.add(asset_id)
                 logger.warning(
-                    "EOD snapshot failed for %s: %s", asset.symbol, redact_secrets(e)
+                    "EOD snapshot failed for asset %s: %s", asset_id, redact_secrets(e)
                 )
 
         logger.info(
@@ -118,10 +120,24 @@ async def snapshot_eod_prices() -> None:
             dict(sorted(skipped.items())),
         )
 
-        # After per-asset EOD prices are stored, roll up today's portfolio row.
+        # After per-asset EOD prices are stored, roll up today's portfolio row,
+        # but only when every held asset that should be priced today is: a
+        # stored row is permanent, a stale carried-forward price would stick.
+        # A skipped day is filled by the next eod_catchup.
         try:
-            svc = PortfolioService(db, base_currency=Currency.USD)
-            await svc.compute_daily_snapshot(_utcnow().date())
+            now = _utcnow()
+            today = now.astimezone(timezone.utc).date()
+            unpriced = _unpriced_for_day(db, asset_ids, today, failed_ids)
+            if unpriced is None:
+                logger.info("EOD snapshot: no asset has a price for %s, no portfolio row", today)
+            elif unpriced:
+                logger.info(
+                    "EOD snapshot: portfolio row for %s skipped, %d asset(s) not priced yet",
+                    today, unpriced,
+                )
+            else:
+                svc = PortfolioService(db, base_currency=Currency.USD)
+                await svc.compute_daily_snapshot(today)
         except Exception as e:
             portfolio_failed = True
             logger.warning("Daily portfolio snapshot failed: %s", redact_secrets(e))
@@ -154,20 +170,33 @@ async def backfill_daily_snapshots_job() -> None:
 CATCHUP_DEFAULT_DAYS = 183  # Yahoo's old 6mo range
 CATCHUP_MAX_DAYS = 400
 CATCHUP_OVERLAP_DAYS = 5
+CATCHUP_RECENT_DAYS = 30  # the window always reaches at least this far back
 PORTFOLIO_CATCHUP_DAYS = 30
 
 
-def _catchup_start(last_trade_date: date | None, now: datetime) -> datetime:
-    """Start of the Yahoo window: five days before the asset's latest EOD
-    trade date (midnight UTC), else 183 days back; never earlier than 400."""
-    if last_trade_date is None:
-        start = now - timedelta(days=CATCHUP_DEFAULT_DAYS)
+def _catchup_start(
+    first_trade_date: date | None, last_trade_date: date | None, now: datetime
+) -> datetime:
+    """Start of the Yahoo window. Normally five days before the asset's latest
+    EOD trade date, but never later than 30 days back (an outage longer than
+    the overlap must not leave a permanent gap). An asset with no rows, or whose
+    earliest row is newer than 183 days (a new holding, or one the snapshot job
+    only just started pricing), is fetched 183 days back so its history fills.
+    Never earlier than 400 days."""
+    today = now.astimezone(timezone.utc).date()
+    full = now - timedelta(days=CATCHUP_DEFAULT_DAYS)
+    if (
+        last_trade_date is None
+        or first_trade_date is None
+        or first_trade_date > today - timedelta(days=CATCHUP_DEFAULT_DAYS)
+    ):
+        start = full
     else:
-        start = datetime.combine(
+        anchor = min(
             last_trade_date - timedelta(days=CATCHUP_OVERLAP_DAYS),
-            dt_time(0, 0),
-            tzinfo=timezone.utc,
+            today - timedelta(days=CATCHUP_RECENT_DAYS),
         )
+        start = datetime.combine(anchor, dt_time(0, 0), tzinfo=timezone.utc)
     return max(start, now - timedelta(days=CATCHUP_MAX_DAYS))
 
 
@@ -201,15 +230,19 @@ def _bar_row_time(
     return close
 
 
-async def _catchup_asset(db, client: httpx.AsyncClient, asset: Asset, now: datetime) -> int:
+async def _catchup_asset(
+    db, client: httpx.AsyncClient, asset: Asset, now: datetime
+) -> int | None:
     """Insert the missing EOD rows for one asset from Yahoo daily bars; never
-    overwrites. Returns the number of bars offered to the insert."""
-    last = (
-        db.query(func.max(PriceSnapshot.trade_date))
+    overwrites. Returns the number of bars offered to the insert, or None when
+    Yahoo has no data for the asset (HTTP 404 or a chart.error body: delisted,
+    or listed under another id). Other HTTP errors raise."""
+    first, last = (
+        db.query(func.min(PriceSnapshot.trade_date), func.max(PriceSnapshot.trade_date))
         .filter(PriceSnapshot.asset_id == asset.id, PriceSnapshot.trade_date.isnot(None))
-        .scalar()
+        .one()
     )
-    start = _catchup_start(last, now)
+    start = _catchup_start(first, last, now)
     # Crypto trades on Yahoo as "<SYM>-USD" (e.g. BTC-USD). The bare ticker
     # ("BTC") is an unrelated ~$35 equity that would poison NAV history.
     yahoo_symbol = asset.symbol.upper()
@@ -224,11 +257,13 @@ async def _catchup_asset(db, client: httpx.AsyncClient, asset: Asset, now: datet
         },
         headers=YAHOO_HEADERS,
     )
+    if response.status_code == 404:
+        return None
     response.raise_for_status()
-    result = response.json().get("chart", {}).get("result")
-    if not result:
-        logger.warning("EOD catch-up: no Yahoo data for %s", asset.symbol)
-        return 0
+    chart = response.json().get("chart") or {}
+    result = chart.get("result")
+    if chart.get("error") or not result:
+        return None
 
     meta = result[0].get("meta", {})
     timestamps = result[0].get("timestamp") or []
@@ -274,14 +309,88 @@ def _expected_on(asset: Asset, day: date) -> bool:
     return session_bounds(exchange, day) is not None
 
 
-async def _portfolio_catchup(db, asset_ids: list[str], failed_ids: set[str], now: datetime) -> int:
+def _first_purchase_dates(db, asset_ids: list[str]) -> dict[str, date | None]:
+    """Earliest lot purchase date (UTC) per asset; None = held since forever."""
+    first: dict[str, date | None] = {}
+    for asset_id, purchased in db.query(HoldingLot.asset_id, HoldingLot.purchase_date).filter(
+        HoldingLot.asset_id.in_(asset_ids)
+    ):
+        day = None
+        if purchased is not None:
+            if purchased.tzinfo is None:
+                purchased = purchased.replace(tzinfo=timezone.utc)
+            day = purchased.astimezone(timezone.utc).date()
+        if asset_id not in first or day is None or (first[asset_id] is not None and day < first[asset_id]):
+            first[asset_id] = day
+    return first
+
+
+def _day_blocked(
+    day: date,
+    assets: dict[str, Asset],
+    first_bought: dict[str, date | None],
+    priceable: set[str],
+    present: set[str],
+    failed_ids: set[str],
+    no_data_ids: frozenset[str] = frozenset(),
+) -> bool:
+    """Is a portfolio row for `day` not yet safe to store? True when a held
+    asset (one with a lot bought on or before `day`) that should have an EOD
+    row that day is missing it: its fetch failed this run, or it is EOD-priceable
+    (has rows) but has none on `day`. Never-priceable assets and assets Yahoo has
+    no data for don't block."""
+    for aid, asset in assets.items():
+        bought = first_bought.get(aid)
+        if bought is not None and bought > day:
+            continue  # not held on `day`
+        if not _expected_on(asset, day):
+            continue
+        if aid in failed_ids:
+            return True
+        if aid in priceable and aid not in present and aid not in no_data_ids:
+            return True
+    return False
+
+
+def _unpriced_for_day(db, asset_ids: list[str], day: date, failed_ids: set[str]) -> int | None:
+    """For `eod_snapshot`: how many held assets block today's portfolio row
+    (0 = go ahead), or None when no held asset has a row for `day` at all."""
+    present = {
+        row[0]
+        for row in db.query(PriceSnapshot.asset_id).filter(
+            PriceSnapshot.asset_id.in_(asset_ids), PriceSnapshot.trade_date == day
+        )
+    }
+    if not present:
+        return None
+    priceable = {
+        row[0]
+        for row in db.query(PriceSnapshot.asset_id)
+        .filter(PriceSnapshot.asset_id.in_(asset_ids), PriceSnapshot.trade_date.isnot(None))
+        .distinct()
+    }
+    assets = {a.id: a for a in db.query(Asset).filter(Asset.id.in_(asset_ids))}
+    first_bought = _first_purchase_dates(db, asset_ids)
+    return sum(
+        1
+        for aid, asset in assets.items()
+        if _day_blocked(day, {aid: asset}, first_bought, priceable, present, failed_ids)
+    )
+
+
+async def _portfolio_catchup(
+    db,
+    asset_ids: list[str],
+    failed_ids: set[str],
+    now: datetime,
+    no_data_ids: frozenset[str] = frozenset(),
+) -> int:
     """Compute portfolio rows for recent UTC days, oldest first. A stored row is
     permanent, so a day qualifies only when it is fully priced: some held asset
-    has an EOD row on D, every EOD-priceable held asset in session on D has one,
-    and no asset whose fetch failed this run is expected on D. Never-priceable
-    assets (no EOD rows at all) don't block. Existing rows are never recomputed.
-    Skipped while the table is empty (`backfill_daily_pnl` owns the initial
-    fill). One try per day; returns the number of failed days."""
+    has an EOD row on D and no held asset is blocking it (see `_day_blocked`).
+    Existing rows are never recomputed. Skipped while the table is empty
+    (`backfill_daily_pnl` owns the initial fill). One try per day; returns the
+    number of failed days."""
     if db.query(PortfolioSnapshot.id).first() is None:
         return 0
     today = now.astimezone(timezone.utc).date()
@@ -310,16 +419,13 @@ async def _portfolio_catchup(db, asset_ids: list[str], failed_ids: set[str], now
         .distinct()
     }
     assets = {a.id: a for a in db.query(Asset).filter(Asset.id.in_(asset_ids))}
+    first_bought = _first_purchase_dates(db, asset_ids)
     svc = PortfolioService(db, base_currency=Currency.USD)
     failed_days = 0
     for day in sorted(set(have_rows) - have_portfolio):
-        present = have_rows[day]
-        blocked = any(
-            _expected_on(asset, day)
-            and (aid in failed_ids or (aid in priceable and aid not in present))
-            for aid, asset in assets.items()
-        )
-        if blocked:
+        if _day_blocked(
+            day, assets, first_bought, priceable, have_rows[day], failed_ids, no_data_ids
+        ):
             logger.info("Portfolio catch-up: skipping %s, prices incomplete", day)
             continue
         try:
@@ -329,6 +435,20 @@ async def _portfolio_catchup(db, asset_ids: list[str], failed_ids: set[str], now
             failed_days += 1
             logger.warning("Portfolio catch-up failed for %s: %s", day, redact_secrets(e))
     return failed_days
+
+
+async def _portfolio_fill_earlier(db, asset_ids: list[str]) -> int:
+    """Insert the portfolio days before the earliest stored row, back to the
+    earliest lot purchase (a holding added after the first fill, or an outage
+    longer than the catch-up window). Insert-only: no stored row is touched.
+    Nothing to do while the table is empty (`backfill_daily_pnl` owns that).
+    Returns the number of rows written."""
+    earliest_row = db.query(func.min(PortfolioSnapshot.date)).scalar()
+    first_bought = [d for d in _first_purchase_dates(db, asset_ids).values() if d is not None]
+    if earliest_row is None or not first_bought or min(first_bought) >= earliest_row:
+        return 0
+    svc = PortfolioService(db, base_currency=Currency.USD)
+    return await svc.backfill_daily_snapshots(before=earliest_row, since=min(first_bought))
 
 
 async def eod_catchup() -> None:
@@ -345,6 +465,7 @@ async def eod_catchup() -> None:
 
         failed = 0
         failed_ids: set[str] = set()
+        no_data_ids: set[str] = set()
         inserted = 0
         async with httpx.AsyncClient(timeout=15.0) as client:
             for asset_id in asset_ids:
@@ -352,24 +473,43 @@ async def eod_catchup() -> None:
                 if not asset:
                     continue
                 try:
-                    inserted += await _catchup_asset(db, client, asset, now)
+                    offered = await _catchup_asset(db, client, asset, now)
                 except Exception as e:  # noqa: BLE001
                     db.rollback()
                     failed += 1
                     failed_ids.add(asset_id)
                     logger.warning(
-                        "EOD catch-up failed for %s: %s", asset.symbol, redact_secrets(e)
+                        "EOD catch-up failed for asset %s: %s", asset_id, redact_secrets(e)
                     )
+                    continue
+                if offered is None:
+                    no_data_ids.add(asset_id)
+                    logger.info("EOD catch-up: no Yahoo data for asset %s", asset_id)
+                else:
+                    inserted += offered
 
         portfolio_failed = 0
         try:
-            portfolio_failed = await _portfolio_catchup(db, asset_ids, failed_ids, now)
+            portfolio_failed = await _portfolio_catchup(
+                db, asset_ids, failed_ids, now, frozenset(no_data_ids)
+            )
         except Exception as e:  # noqa: BLE001
             db.rollback()
             portfolio_failed = 1
             logger.warning("Portfolio catch-up failed: %s", redact_secrets(e))
+        try:
+            filled = await _portfolio_fill_earlier(db, asset_ids)
+            if filled:
+                logger.info("Portfolio catch-up: filled %d earlier day(s)", filled)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            portfolio_failed += 1
+            logger.warning("Earlier portfolio days failed: %s", redact_secrets(e))
 
-        logger.info("EOD catch-up complete: %d bars offered, %d asset(s) failed", inserted, failed)
+        logger.info(
+            "EOD catch-up complete: %d bars offered, %d asset(s) failed, %d without data",
+            inserted, failed, len(no_data_ids),
+        )
         if failed or portfolio_failed:
             message = f"EOD catch-up: {failed} asset(s) failed"
             if portfolio_failed:
