@@ -64,9 +64,20 @@ JOB_LIMITS: dict[str, tuple[timedelta, bool]] = {
 LEADER_LIMIT = timedelta(minutes=3)
 LEADER_JOB = "scheduler_leader"
 
-ALERT_DELIVERY_LIMIT = timedelta(minutes=15)
+def alert_delivery_limit(alert_minutes: int) -> timedelta:
+    """A triggered alert may wait three evaluation cycles for its Telegram send
+    (one failed send is retried the next cycle)."""
+    return timedelta(minutes=POLLS_TOLERATED * alert_minutes)
+
+
+def open_grace(quote_minutes: int) -> timedelta:
+    """Time after the open before prices must be fresh: two refresh cycles."""
+    return timedelta(minutes=2 * quote_minutes)
+
+
+ALERT_DELIVERY_LIMIT = alert_delivery_limit(settings.alert_evaluation_interval_minutes)
 PRICE_FRESH_FOR = timedelta(minutes=POLLS_TOLERATED * settings.quote_refresh_interval_minutes)
-OPEN_GRACE = timedelta(minutes=15)
+OPEN_GRACE = open_grace(settings.quote_refresh_interval_minutes)
 FRESH_SOURCES = frozenset().union(*ALERTABLE_SOURCES.values())
 SKIPPED = "skipped: db unreachable"
 STATEMENT_TIMEOUT = "2s"

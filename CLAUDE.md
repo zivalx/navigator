@@ -106,9 +106,9 @@ for defaults.
   timeout, `tcp_user_timeout` 20 s) and the server frees the lock at about 60 s (session
   keepalives), so the old leader always stops first. In-flight jobs can outlive demotion;
   idempotency (the EOD unique index, `SKIP LOCKED` on notifications) covers it.
-  Non-Postgres URLs use an always-leader lock. Lock key registry (identical across the platform, never reuse): `7400417` Navigator
-  init/migrate, `7400418` Navigator scheduler leader, `7400419` and `7400420` trender (see
-  `app/locks.py`).
+  Non-Postgres URLs use an always-leader lock. Lock key registry (identical across the
+  platform, never reuse): `7400417` Navigator init/migrate, `7400418` Navigator scheduler
+  leader, `7400419` and `7400420` trender (see `app/locks.py`).
 - **APScheduler jobs** (`tasks/scheduler.py`, `build_scheduler()`; defaults `coalesce`,
   `max_instances=1`, `misfire_grace_time=120`; every job is wrapped by a heartbeat that
   writes `job_heartbeats` and is skipped when this process is not the leader):
@@ -121,7 +121,7 @@ for defaults.
   | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset; today's portfolio row only when every held, priceable, in-session asset has today's row |
   | `breadth_snapshot` | 17:00 America/New_York, daily | S5FI/S5TH into Redis (no expiry) |
   | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting (window: last row - 5 d, at least 30 d back, 183 d for new holdings; a 404 or `chart.error` is "no data", not a failure); then portfolio rows (skipped while `portfolio_snapshots` is empty), and earlier missing portfolio days insert-only |
-  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty), `breadth_warm_start` in order |
+  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed; writes only exchanges that are already closed), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty), `breadth_warm_start` in order |
 
   `backfill_historical` no longer exists: `eod_catchup` and `leader_startup` replace it.
 - **EOD rules** (`services/eod.py`, `services/sessions.py`): EOD eligibility is separate

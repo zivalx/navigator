@@ -161,8 +161,11 @@ async def snapshot_eod_prices(only_closed: bool = False) -> None:
                     await svc.compute_daily_snapshot(today)
                 except IntegrityError:
                     # the startup run and the 16:30 cron overlapped: the other
-                    # one stored today's row first
+                    # one stored today's row first. Any other integrity error
+                    # (no row for today) is a real failure.
                     db.rollback()
+                    if db.query(PortfolioSnapshot.id).filter_by(date=today).first() is None:
+                        raise
                     logger.info("EOD snapshot: portfolio row for %s already written", today)
         except Exception as e:
             portfolio_failed = True
@@ -285,7 +288,7 @@ async def _catchup_asset(
     )
     if response.status_code == 404:
         return None
-    if 400 <= response.status_code < 500:
+    if 400 <= response.status_code < 500 and response.status_code != 429:  # 429 stays a failure
         try:
             error_body = response.json()
         except ValueError:

@@ -930,6 +930,7 @@ async def test_portfolio_row_conflict_with_overlapping_run_is_not_a_failure(
     _hold(db_session, symbol="AAA")
     env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
     _quotes(monkeypatch)
+    _portfolio_row(db_session, FRI)  # the overlapping run stored it
 
     async def conflict(self, day):
         raise IntegrityError("INSERT INTO portfolio_snapshots", {}, Exception("UNIQUE constraint failed"))
@@ -939,3 +940,46 @@ async def test_portfolio_row_conflict_with_overlapping_run_is_not_a_failure(
         await snapshot_eod_prices()  # must not raise
     assert "already written" in caplog.text
     assert "Daily portfolio snapshot failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_catchup_http_429_with_chart_error_body_still_fails(db_session, env):
+    _hold(db_session)
+    env["handler"] = lambda r: httpx.Response(
+        429, json={"chart": {"result": None, "error": {"code": "Too Many Requests"}}}
+    )
+    with pytest.raises(RuntimeError, match="1 asset"):
+        await eod_catchup()
+
+
+def _conflict(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    async def boom(self, day):
+        raise IntegrityError("INSERT INTO portfolio_snapshots", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(PortfolioService, "compute_daily_snapshot", boom)
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_without_a_row_for_today_is_a_failure(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA")
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch)
+    _conflict(monkeypatch)  # no portfolio row exists: not an overlap
+    with pytest.raises(RuntimeError, match="daily portfolio row failed"):
+        await snapshot_eod_prices()
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_with_todays_row_present_is_already_written(db_session, env, monkeypatch):
+    from app.tasks.scheduler import snapshot_eod_prices
+
+    _hold(db_session, symbol="AAA")
+    env["now"] = FRI_AFTER_CLOSE + timedelta(minutes=30)
+    _quotes(monkeypatch)
+    _portfolio_row(db_session, FRI)  # the overlapping run stored it
+    _conflict(monkeypatch)
+    await snapshot_eod_prices()  # must not raise

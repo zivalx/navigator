@@ -113,7 +113,7 @@ def _alert_ok(db, mp):
 
 
 def _alert_fail(db, mp):
-    alert(db, us(db), triggered_at=NOW - timedelta(minutes=20))
+    alert(db, us(db), triggered_at=NOW - timedelta(minutes=50))
 
 
 def _price_ok(make, source="yahoo"):
@@ -200,7 +200,7 @@ def test_prices_closed_outside_session(db_session):
     assert checks["prices_tase"] == Check(True, "closed")
 
 
-def test_prices_closed_in_first_15_min_after_open(db_session):
+def test_prices_closed_in_first_minutes_after_open(db_session):
     us(db_session)
     just_after_open = datetime(2026, 11, 18, 14, 40, tzinfo=timezone.utc)  # 09:40 NY
     assert deep_checks(db_session, just_after_open)["prices_us"] == Check(True, "closed")
@@ -270,7 +270,7 @@ def test_naive_times_treated_as_utc(db_session):
         hb(db_session, name, started=naive - timedelta(minutes=1), success=naive - timedelta(minutes=1))
     a = us(db_session)
     snap(db_session, a, at=naive - timedelta(minutes=5))
-    alert(db_session, a, triggered_at=naive - timedelta(minutes=20))
+    alert(db_session, a, triggered_at=naive - timedelta(minutes=50))
     checks = deep_checks(db_session, NOW)
     assert checks["scheduler_leader"].detail == "leader heartbeat 10s ago"
     assert checks["prices_us"].ok
@@ -456,3 +456,26 @@ def test_poll_job_overdue_after_three_intervals(db_session, age_min, ok):
     hb(db_session, "quote_refresh", started=NOW - timedelta(minutes=age_min),
        success=NOW - timedelta(minutes=age_min))
     assert deep_checks(db_session, NOW)["job_quote_refresh"].ok is ok
+
+
+def test_open_grace_and_delivery_defaults_and_scaling():
+    from app.services.health import ALERT_DELIVERY_LIMIT, OPEN_GRACE, alert_delivery_limit, open_grace
+
+    assert OPEN_GRACE == timedelta(minutes=30)
+    assert ALERT_DELIVERY_LIMIT == timedelta(minutes=45)
+    assert open_grace(10) == timedelta(minutes=20)
+    assert alert_delivery_limit(20) == timedelta(minutes=60)
+
+
+def test_first_poll_at_open_plus_20_min_is_not_flagged(db_session):
+    us(db_session)  # no snapshot yet
+    at = datetime(2026, 11, 18, 14, 50, tzinfo=timezone.utc)  # 09:50 NY = open + 20 min
+    assert deep_checks(db_session, at)["prices_us"] == Check(True, "closed")
+    late = datetime(2026, 11, 18, 15, 5, tzinfo=timezone.utc)  # open + 35 min
+    assert not deep_checks(db_session, late)["prices_us"].ok
+
+
+def test_one_failed_send_retried_next_cycle_is_not_flagged(db_session):
+    healthy(db_session)
+    alert(db_session, us(db_session), triggered_at=NOW - timedelta(minutes=20))  # unsent for 20 min
+    assert deep_checks(db_session, NOW)["alert_delivery"].ok
