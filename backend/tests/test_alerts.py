@@ -452,3 +452,37 @@ def test_alert_response_includes_asset_currency(client, db_session):
     assert response.json()["currency"] == "ILS"
     listed = client.get("/api/alerts/").json()
     assert listed[0]["currency"] == "ILS"
+
+
+# ---------------------------------------------------------------------------
+# Notification de-duplication across concurrent passes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_notify_skips_alert_stamped_by_other_pass(eval_db, monkeypatch):
+    asset = make_asset(eval_db, symbol="AAPL")
+    first = make_alert(eval_db, asset, triggered_at=NOW - timedelta(minutes=2), triggered_price=1.0)
+    second = make_alert(eval_db, asset, triggered_at=NOW - timedelta(minutes=1), triggered_price=1.0)
+    first_id, second_id = first.id, second.id
+
+    class RacingSender:
+        enabled = True
+
+        def __init__(self):
+            self.sent_ids = []
+
+        async def send(self, text):
+            # Another pass delivers the second alert while we send the first.
+            self.sent_ids.append(first_id if not self.sent_ids else "other")
+            eval_db.query(PriceAlert).filter(PriceAlert.id == second_id).update(
+                {"notified_at": datetime.now(timezone.utc)}
+            )
+            eval_db.commit()
+            return True
+
+    sender = RacingSender()
+    monkeypatch.setattr(scheduler_module, "NotificationService", lambda: sender)
+
+    await scheduler_module.notify_triggered_alerts(eval_db)
+
+    assert sender.sent_ids == [first_id]

@@ -364,25 +364,45 @@ async def notify_triggered_alerts(db) -> None:
     notifications at-most-once. Errors never propagate into the evaluation
     loop.
     """
-    pending = (
-        db.query(PriceAlert)
+    pending_ids = [
+        row[0]
+        for row in db.query(PriceAlert.id)
         .filter(
             PriceAlert.triggered_at.isnot(None),
             PriceAlert.notified_at.is_(None),
             PriceAlert.notification_skipped_at.is_(None),
         )
+        .order_by(PriceAlert.triggered_at, PriceAlert.id)
         .all()
-    )
-    if not pending:
+    ]
+    if not pending_ids:
+        db.rollback()  # end the read transaction
         return
 
     service = NotificationService()
-    for alert in pending:
+    for alert_id in pending_ids:
         try:
+            # Re-select under a row lock: a concurrent pass (e.g. two
+            # processes that both believe they lead) either holds the row,
+            # or already stamped it. Either way we skip instead of resending.
+            alert = (
+                db.query(PriceAlert)
+                .filter(
+                    PriceAlert.id == alert_id,
+                    PriceAlert.notified_at.is_(None),
+                    PriceAlert.notification_skipped_at.is_(None),
+                )
+                .with_for_update(skip_locked=True)
+                .first()
+            )
+            if alert is None:
+                db.rollback()
+                continue
             if service.enabled:
                 sent = await service.send(format_alert_message(alert))
                 if not sent:
-                    continue  # retry next cycle
+                    db.rollback()  # release the row lock; retry next cycle
+                    continue
                 alert.notified_at = datetime.now(timezone.utc)
             else:
                 alert.notification_skipped_at = datetime.now(timezone.utc)
@@ -395,7 +415,7 @@ async def notify_triggered_alerts(db) -> None:
         except Exception as e:
             db.rollback()
             logger.warning(
-                "Alert notification failed for %s: %s", alert.id, e
+                "Alert notification failed for %s: %s", alert_id, redact_secrets(e)
             )
 
 
