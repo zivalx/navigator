@@ -8,6 +8,7 @@
 # Usage:
 #   ./scripts/provision.sh                      # cx22 in Falkenstein (EU)
 #   LOCATION=ash SERVER_TYPE=cpx21 ./scripts/provision.sh   # Ashburn (US) — CX types are EU-only
+# NOTE: host provisioning and the 80/443 firewall now belong to zivalx-ops; this script is superseded.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

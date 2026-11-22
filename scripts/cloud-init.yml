@@ -1,6 +1,7 @@
 #cloud-config
 # Navigator VPS first-boot provisioning (Phase 2.1 + 2.2 of TODO-DEPLOYMENT.md)
 # Passed via --user-data-from-file in scripts/provision.sh.
+# NOTE: host provisioning and the 80/443 firewall now belong to zivalx-ops; this file is superseded.
 # SSH key is injected into root by Hetzner (--ssh-key on server create).
 
 package_update: true
