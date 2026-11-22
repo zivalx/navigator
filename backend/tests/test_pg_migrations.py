@@ -169,13 +169,15 @@ def test_pg_migrate_main_prints_only_revisions(monkeypatch, capsys):
         assert capsys.readouterr().out.strip().splitlines() == [f"schema: {head_revision()} -> {head_revision()}"]
 
 
-def test_legacy_schema_constants_match_models():
-    """The adopt path is valid only while the baseline models are unchanged
-    (runs in the default suite; no Postgres needed)."""
+def test_legacy_verify_constants_track_models():
+    """What legacy_schema.verify() checks still exists in the models: every
+    baseline table is still a model (later revisions may add more), the enum
+    label sets and the PriceAlert columns match exactly. It does not detect
+    column changes to other baseline tables. Default suite; no Postgres."""
     from app import legacy_schema
     from app.models.alert import AlertIntent, AlertRule, PriceAlert
 
-    assert set(legacy_schema.BASELINE_TABLES) == set(Base.metadata.tables)
+    assert set(legacy_schema.BASELINE_TABLES) <= set(Base.metadata.tables)
     assert legacy_schema.EXPECTED_ENUM_LABELS == {
         "currency": frozenset(m.name for m in Currency),
         "assettype": frozenset(m.name for m in AssetType),
