@@ -116,3 +116,21 @@ def test_build_script_passes_secret_only_when_corp_ca_set():
 
 def test_deploy_script_does_not_use_corp_ca():
     assert "corp_ca" not in (ROOT / "scripts" / "deploy.sh").read_text().lower()
+
+
+ENV_PROD_EXAMPLE = COMPOSE.parent / ".env.prod.example"
+# Settings an operator never sets in .env.prod: scheduler_enabled is a switch for scripts
+# and laptops sharing a DB, and production must keep its default (true).
+_NOT_IN_PROD_TEMPLATE = {"SCHEDULER_ENABLED"}
+
+
+def test_env_prod_example_lists_every_setting():
+    # .env.prod is filled in from this template, so a setting missing here is a setting
+    # nobody sets in production (e.g. Telegram, which silently leaves alerts in-app only).
+    import re
+
+    from app.config import Settings
+
+    listed = set(re.findall(r"^([A-Z0-9_]+)=", ENV_PROD_EXAMPLE.read_text(), re.M))
+    expected = {name.upper() for name in Settings.model_fields} - _NOT_IN_PROD_TEMPLATE
+    assert sorted(expected - listed) == []
