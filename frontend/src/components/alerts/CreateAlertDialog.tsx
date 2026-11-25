@@ -15,13 +15,16 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { formatMoney } from './alertUtils';
+import { formatMoney, currencySymbol } from '@/lib/utils';
+import { usePortfolio } from '@/contexts/PortfolioContext';
 
 export interface AlertAssetContext {
   assetId?: string;
   symbol: string;
   name?: string;
   currentPrice?: number;
+  /** Asset currency code; looked up from the portfolio assets when absent. */
+  currency?: string;
 }
 
 interface CreateAlertDialogProps {
@@ -41,6 +44,7 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
   const queryClient = useQueryClient();
   const isEdit = !!editAlert;
   const isLocked = !!asset && !isEdit;
+  const { assets } = usePortfolio();
 
   const [selectedAsset, setSelectedAsset] = useState<AlertAssetContext | null>(null);
   const [symbolQuery, setSymbolQuery] = useState('');
@@ -54,6 +58,12 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
 
   const isTrailing = rule === 'trailing_stop';
+  const currency =
+    (isEdit ? editAlert?.currency : undefined) ??
+    selectedAsset?.currency ??
+    assets.find((a) => a.symbol === selectedAsset?.symbol)?.currency ??
+    'USD';
+  const currencySign = currencySymbol(currency);
 
   // (Re)initialize fields every time the dialog is opened.
   useEffect(() => {
@@ -104,13 +114,17 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
 
   const handleSelectSearchResult = async (result: SearchResult) => {
     let currentPrice: number | undefined;
+    // Search hits carry no currency: take it from the quote. Without one, the
+    // dialog falls back to the known asset's currency, then USD.
+    let currency: string | undefined;
     try {
       const quote = await api.getQuote(result.symbol);
       currentPrice = quote?.price;
+      currency = quote?.currency ?? undefined;
     } catch {
       // Presets just won't be available; the user can still enter a threshold manually.
     }
-    setSelectedAsset({ assetId: result.id, symbol: result.symbol, name: result.name, currentPrice });
+    setSelectedAsset({ assetId: result.id, symbol: result.symbol, name: result.name, currentPrice, currency });
     setSymbolQuery('');
     setSearchResults([]);
   };
@@ -271,7 +285,7 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
                     <div className="flex gap-1.5">
                       <div className="relative flex-1">
                         {trailType === 'amount' && (
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">{currencySign}</span>
                         )}
                         <Input
                           id="alert-trail"
@@ -289,7 +303,7 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="percent">%</SelectItem>
-                          <SelectItem value="amount">$</SelectItem>
+                          <SelectItem value="amount">{currencySign}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -298,7 +312,7 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
                   <div className="space-y-2">
                     <Label htmlFor="alert-threshold">Threshold</Label>
                     <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">{currencySign}</span>
                       <Input
                         id="alert-threshold"
                         type="number"
@@ -350,7 +364,7 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
               {!isTrailing && selectedAsset?.currentPrice !== undefined && (
                 <div className="space-y-1.5">
                   <Label className="text-xs text-muted-foreground">
-                    Quick presets (current price ${selectedAsset.currentPrice.toFixed(2)})
+                    Quick presets (current price {formatMoney(selectedAsset.currentPrice, currency)})
                   </Label>
                   <div className="flex gap-2 flex-wrap">
                     <Button type="button" variant="outline" size="sm" onClick={() => applyPreset('price_below', -0.05)}>
@@ -368,8 +382,8 @@ export function CreateAlertDialog({ open, onOpenChange, asset, editAlert }: Crea
 
               {previewStop != null && previewBase != null && (
                 <div className="rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-                  Stop starts at <span className="font-mono font-medium text-foreground">{formatMoney(previewStop)}</span>{' '}
-                  (from {isEdit ? 'high' : 'current price'} {formatMoney(previewBase)}) and rises as the price makes new
+                  Stop starts at <span className="font-mono font-medium text-foreground">{formatMoney(previewStop, currency)}</span>{' '}
+                  (from {isEdit ? 'high' : 'current price'} {formatMoney(previewBase, currency)}) and rises as the price makes new
                   highs.
                 </div>
               )}

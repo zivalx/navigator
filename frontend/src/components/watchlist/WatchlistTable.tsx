@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { usePortfolio } from '@/contexts/PortfolioContext';
-import { api } from '@/lib/api';
+import { api, buildCreateAssetPayload, assetCreateErrorMessage } from '@/lib/api';
 import { PercentChange } from '@/components/common/PriceDisplay';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,6 +33,7 @@ import {
 import { EmptyState } from '@/components/common/EmptyState';
 import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
 import type { WatchlistItemWithAsset } from '@/lib/types';
+import { formatMoney, currencySymbol } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export function WatchlistTable() {
@@ -65,7 +66,7 @@ export function WatchlistTable() {
   
   // Edit item dialog
   const [editItemDialogOpen, setEditItemDialogOpen] = useState(false);
-  const [itemToEdit, setItemToEdit] = useState<{ id: string; symbol: string; notes: string; targetPrice: string } | null>(null);
+  const [itemToEdit, setItemToEdit] = useState<{ id: string; symbol: string; currency: string; notes: string; targetPrice: string } | null>(null);
 
   // Add alert dialog state
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
@@ -120,15 +121,7 @@ export function WatchlistTable() {
           assetId = existing.id;
         } catch {
           // Not found — create it
-          const created = await api.createAsset({
-            symbol: asset.symbol,
-            name: asset.name,
-            exchange: asset.exchange || '',
-            currency: asset.currency || 'USD',
-            asset_type: asset.assetType || asset.asset_type || 'stock',
-            market_region: asset.marketRegion || asset.market_region || 'US',
-            provider_ids: {},
-          });
+          const created = await api.createAsset(buildCreateAssetPayload(asset));
           assetId = created.id;
         }
       }
@@ -136,7 +129,7 @@ export function WatchlistTable() {
       addToWatchlist(assetId);
       toast.success(`Added ${asset.symbol} to ${activeWatchlist?.name || 'watchlist'}`);
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to add symbol');
+      toast.error(assetCreateErrorMessage(err, err?.message || 'Failed to add symbol'));
     }
     setAddDialogOpen(false);
     setSymbolSearch('');
@@ -201,6 +194,7 @@ export function WatchlistTable() {
     setItemToEdit({
       id: item.id,
       symbol: item.asset.symbol,
+      currency: item.asset.currency || 'USD',
       notes: item.notes || '',
       targetPrice: item.targetPrice?.toString() || '',
     });
@@ -440,7 +434,7 @@ export function WatchlistTable() {
                   </TableCell>
                   <TableCell className="text-right">
                     {item.currentPrice !== undefined ? (
-                      <span className="font-mono">${item.currentPrice.toFixed(2)}</span>
+                      <span className="font-mono">{formatMoney(item.currentPrice, item.asset?.currency || 'USD')}</span>
                     ) : (
                       <span className="text-muted-foreground text-sm">N/A</span>
                     )}
@@ -470,7 +464,7 @@ export function WatchlistTable() {
                     {item.targetPrice ? (
                       <div className="flex items-center justify-end gap-1">
                         <Target className="h-3 w-3 text-primary" />
-                        <span className="font-mono text-sm">${item.targetPrice.toFixed(2)}</span>
+                        <span className="font-mono text-sm">{formatMoney(item.targetPrice, item.asset?.currency || 'USD')}</span>
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-sm">—</span>
@@ -574,7 +568,7 @@ export function WatchlistTable() {
             <div className="space-y-2">
               <label className="text-sm font-medium">Target Price</label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">{currencySymbol(itemToEdit?.currency || 'USD')}</span>
                 <Input
                   type="number"
                   step="0.01"

@@ -6,15 +6,21 @@ from app.models.asset import Asset, AssetType, Currency, MarketRegion
 from app.services.market_data import MarketDataService
 
 
-def make_asset(db, symbol="AAA", currency=Currency.USD):
+def make_asset(
+    db,
+    symbol="AAA",
+    currency=Currency.USD,
+    exchange="NASDAQ",
+    market_region=MarketRegion.US,
+):
     asset = Asset(
         id=str(uuid.uuid4()),
         symbol=symbol,
         name=f"{symbol} Inc.",
-        exchange="NASDAQ",
+        exchange=exchange,
         currency=currency,
         asset_type=AssetType.STOCK,
-        market_region=MarketRegion.US,
+        market_region=market_region,
     )
     db.add(asset)
     db.commit()

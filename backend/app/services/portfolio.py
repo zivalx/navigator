@@ -14,6 +14,7 @@ from ..schemas.portfolio import PortfolioSummary
 from ..schemas.asset import Currency
 from .market_data import MarketDataService
 from .fx import FxService
+from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,27 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt
 
 
+def _currency_code(value) -> str:
+    """ISO code of a currency held as a model enum, schema enum or plain str
+    (schemas use use_enum_values, so either may appear)."""
+    return getattr(value, "value", value)
+
+
+def _is_lot_currency_check(lot, price_currency=None) -> bool:
+    """A non-ILS lot on an ILS listing: the known result of the old USD
+    default, so the recorded cost is really shekels (spec 6.4).
+
+    The listing is ILS when the stored asset currency says so or, before the
+    audit has fixed an old TASE asset still labelled USD, when its price
+    (live quote, or latest stored snapshot) is in ILS."""
+    if _currency_code(lot.cost_currency) == Currency.ILS.value:
+        return False
+    return Currency.ILS.value in (
+        _currency_code(lot.asset.currency),
+        _currency_code(price_currency) if price_currency is not None else None,
+    )
+
+
 class PortfolioService:
     """Service for portfolio calculations and analytics."""
 
@@ -45,7 +67,11 @@ class PortfolioService:
         self.fx_service = FxService(db)
 
     async def get_holdings_with_prices(self) -> List[HoldingWithAsset]:
-        """Get all holdings with current prices and P&L."""
+        """Get all holdings with current prices and P&L.
+
+        A lot that cannot be valued in the base currency is flagged
+        (`valueUnavailable` + `unavailableReason`) with every base-currency
+        field None, never filled with an unconverted native amount."""
         holdings = self.db.query(HoldingLot).all()
         result = []
 
@@ -62,70 +88,101 @@ class PortfolioService:
                 "createdAt": holding.created_at,
                 "asset": holding.asset,
             }
-
-            # Cost basis in base currency — independent of the live quote, so
-            # compute it even if the quote fetch below fails. Exposed as
-            # avgCostBase so callers can aggregate cost without mixing the
-            # lot's native cost currency into a base-currency total.
-            try:
-                avg_cost_base = await self.fx_service.convert(
-                    holding.avg_cost,
-                    holding.cost_currency,
-                    self.base_currency,
-                )
-            except Exception:
-                avg_cost_base = holding.avg_cost
-            holding_dict["avgCostBase"] = avg_cost_base
-
-            # Get current price
-            try:
-                quote = await self.market_service.get_quote(
-                    holding.asset.symbol,
-                    holding.asset.asset_type.value
-                )
-
-                current_price = quote["price"]
-                # change/changePercent are None on a stale db_cache fallback —
-                # treat unknown as 0 so it contributes nothing to daily P&L.
-                price_change = quote.get("change") or 0
-                price_change_percent = quote.get("changePercent") or 0
-                quote_currency = Currency(quote.get("currency", "USD"))
-
-                # Convert price and the daily change to base currency. The
-                # change is a per-share delta, so the same FX rate applies;
-                # leaving it native would make `quantity * priceChange` sums
-                # wrong for any non-base holding.
-                current_price_base = await self.fx_service.convert(
-                    current_price, quote_currency, self.base_currency
-                )
-                price_change_base = await self.fx_service.convert(
-                    price_change, quote_currency, self.base_currency
-                )
-
-                market_value = current_price_base * holding.quantity
-                cost_basis = avg_cost_base * holding.quantity
-                unrealized_pnl = market_value - cost_basis
-                unrealized_pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
-
-                holding_dict.update({
-                    "currentPrice": current_price_base,
-                    "priceChange": price_change_base,
-                    "priceChangePercent": price_change_percent,
-                    "marketValue": market_value,
-                    "unrealizedPnL": unrealized_pnl,
-                    "unrealizedPnLPercent": unrealized_pnl_percent,
-                })
-
-            except Exception as e:
-                # If we can't get current price, just return without market data
-                logger.warning("Error getting price for %s: %s", holding.asset.symbol, e)
-
+            holding_dict.update(await self._value_lot(holding))
             result.append(HoldingWithAsset(**holding_dict))
 
         return result
 
+    async def _value_lot(self, holding: HoldingLot) -> dict:
+        """Base-currency market fields for one lot, or the unavailable flag.
+
+        Rules, first match wins (spec 6.4/6.5, plan Ruling 1):
+        1. ILS asset with a non-ILS lot -> lot_currency_check
+        2. cost->base FX conversion raises -> fx_unavailable
+        3. the quote raises -> price_unavailable
+        4. ILS quote with a non-ILS lot (asset label not yet fixed by the
+           audit) -> lot_currency_check
+        5. quote currency is not a Currency member, or price->base FX
+           conversion raises -> fx_unavailable
+        """
+        symbol = holding.asset.symbol
+
+        def unavailable(reason: str, detail=None, **extra) -> dict:
+            logger.warning(
+                "holding %s has no %s value: %s%s", symbol, self.base_currency.value,
+                reason, f" ({redact_secrets(detail)})" if detail else "",
+            )
+            return {"valueUnavailable": True, "unavailableReason": reason, **extra}
+
+        if _is_lot_currency_check(holding):
+            return unavailable("lot_currency_check")
+
+        # Cost basis in base currency, exposed as avgCostBase so callers can
+        # aggregate cost without mixing native cost currencies into a total.
+        try:
+            avg_cost_base = await self.fx_service.convert(
+                holding.avg_cost,
+                Currency(_currency_code(holding.cost_currency)),
+                self.base_currency,
+            )
+        except Exception:
+            return unavailable("fx_unavailable")
+
+        try:
+            quote = await self.market_service.get_quote(
+                symbol,
+                holding.asset.asset_type.value
+            )
+            current_price = quote["price"]
+            if current_price is None:
+                raise ValueError("quote has no price")
+        except Exception as e:
+            return unavailable("price_unavailable", detail=e)
+
+        if _is_lot_currency_check(holding, price_currency=quote.get("currency")):
+            return unavailable("lot_currency_check")
+
+        # change/changePercent are None on a stale db_cache fallback —
+        # treat unknown as 0 so it contributes nothing to daily P&L.
+        price_change = quote.get("change") or 0
+        price_change_percent = quote.get("changePercent") or 0
+
+        # Convert price and the daily change to base currency. The change is
+        # a per-share delta, so the same FX rate applies; leaving it native
+        # would make `quantity * priceChange` sums wrong for any non-base
+        # holding.
+        try:
+            quote_currency = Currency(quote.get("currency", "USD"))
+            current_price_base = await self.fx_service.convert(
+                current_price, quote_currency, self.base_currency
+            )
+            price_change_base = await self.fx_service.convert(
+                price_change, quote_currency, self.base_currency
+            )
+        except Exception:
+            return unavailable("fx_unavailable", priceChangePercent=price_change_percent)
+
+        market_value = current_price_base * holding.quantity
+        cost_basis = avg_cost_base * holding.quantity
+        unrealized_pnl = market_value - cost_basis
+        unrealized_pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis else 0
+
+        return {
+            "avgCostBase": avg_cost_base,
+            "currentPrice": current_price_base,
+            "priceChange": price_change_base,
+            "priceChangePercent": price_change_percent,
+            "marketValue": market_value,
+            "unrealizedPnL": unrealized_pnl,
+            "unrealizedPnLPercent": unrealized_pnl_percent,
+        }
+
     async def get_grouped_holdings(self) -> List[GroupedHolding]:
-        """Get holdings grouped by asset."""
+        """Get holdings grouped by asset.
+
+        A group is value_unavailable when any of its lots is (first flagged
+        lot's reason); its base-currency fields are then None. The weighted
+        average cost reuses each lot's avgCostBase — no FX calls here."""
         holdings_with_prices = await self.get_holdings_with_prices()
 
         # Group by asset_id
@@ -134,32 +191,43 @@ class PortfolioService:
             aid = holding.asset_id
             if aid not in grouped:
                 grouped[aid] = {
-                    "assetId": aid,
                     "asset": holding.asset,
                     "lots": [],
                     "totalQuantity": 0,
                     "totalCost": 0,
+                    "reason": None,
                 }
 
-            grouped[aid]["lots"].append(holding)
-            grouped[aid]["totalQuantity"] += holding.quantity
-
-            # Convert cost to base currency for weighted average
-            cost_base = await self.fx_service.convert(
-                holding.avg_cost,
-                Currency(holding.cost_currency),
-                self.base_currency
-            )
-            grouped[aid]["totalCost"] += cost_base * holding.quantity
+            group = grouped[aid]
+            group["lots"].append(holding)
+            group["totalQuantity"] += holding.quantity
+            if holding.value_unavailable:
+                if group["reason"] is None:
+                    group["reason"] = holding.unavailable_reason
+            else:
+                group["totalCost"] += holding.avg_cost_base * holding.quantity
 
         # Calculate weighted averages and totals
         result = []
         for asset_id, group in grouped.items():
             total_quantity = group["totalQuantity"]
+            first_lot = group["lots"][0]
+
+            if group["reason"] is not None:
+                result.append(GroupedHolding(
+                    assetId=asset_id,
+                    asset=group["asset"],
+                    lots=group["lots"],
+                    totalQuantity=total_quantity,
+                    priceChangePercent=first_lot.price_change_percent,
+                    valueUnavailable=True,
+                    unavailableReason=group["reason"],
+                ))
+                continue
+
             avg_cost = group["totalCost"] / total_quantity if total_quantity else 0
 
             # Use first lot's current price (they should all be the same)
-            first_lot = group["lots"][0]
             current_price = first_lot.current_price
             price_change = first_lot.price_change
             price_change_percent = first_lot.price_change_percent
@@ -190,6 +258,23 @@ class PortfolioService:
 
         return result
 
+    def _latest_price_currency(self, asset_id: str, when: datetime):
+        """Currency of the asset's latest stored price on/before `when`, if any."""
+        snap = self._latest_snapshot(asset_id, when)
+        return snap.currency if snap is not None else None
+
+    def _latest_snapshot(self, asset_id: str, when: datetime) -> Optional[PriceSnapshot]:
+        """Most recent PriceSnapshot for an asset on or before `when`."""
+        return (
+            self.db.query(PriceSnapshot)
+            .filter(
+                PriceSnapshot.asset_id == asset_id,
+                PriceSnapshot.timestamp <= when,
+            )
+            .order_by(PriceSnapshot.timestamp.desc())
+            .first()
+        )
+
     async def _get_nav_at_date(
         self,
         target_date: datetime,
@@ -208,7 +293,8 @@ class PortfolioService:
         A lot only contributes from its `purchase_date` onward — lots
         purchased after `target_date` are excluded.
         Returns None if no historical price data is available for any
-        (already-purchased) asset.
+        (already-purchased) asset, or if any snapshot price cannot be
+        converted to the base currency (callers omit that point).
 
         `holdings` can be passed in to avoid re-querying the DB when this is
         called repeatedly across many dates (see `get_nav_history`).
@@ -230,15 +316,7 @@ class PortfolioService:
                 continue
 
             # Find the closest price snapshot on or before the target date
-            snapshot = (
-                self.db.query(PriceSnapshot)
-                .filter(
-                    PriceSnapshot.asset_id == holding.asset_id,
-                    PriceSnapshot.timestamp <= target_date,
-                )
-                .order_by(PriceSnapshot.timestamp.desc())
-                .first()
-            )
+            snapshot = self._latest_snapshot(holding.asset_id, target_date)
 
             if snapshot is None:
                 continue
@@ -248,11 +326,17 @@ class PortfolioService:
             try:
                 price_base = await self.fx_service.convert(
                     snapshot.price,
-                    Currency(snapshot.currency),
+                    Currency(_currency_code(snapshot.currency)),
                     self.base_currency,
                 )
             except Exception:
-                price_base = snapshot.price
+                # A NAV missing a holding is a fake dip; omit the point.
+                logger.warning(
+                    "NAV at %s unavailable: no FX rate %s->%s",
+                    target_date.date(), _currency_code(snapshot.currency),
+                    self.base_currency.value,
+                )
+                return None
 
             total_nav += price_base * holding.quantity
 
@@ -337,7 +421,14 @@ class PortfolioService:
 
     async def get_summary(self) -> PortfolioSummary:
         """Calculate portfolio summary with daily, weekly, and monthly P&L."""
-        holdings = await self.get_holdings_with_prices()
+        all_holdings = await self.get_holdings_with_prices()
+        # Flagged holdings have no base-currency value: they are excluded from
+        # every total, current and historical alike.
+        holdings = [h for h in all_holdings if not h.value_unavailable]
+        flagged_ids = {h.id for h in all_holdings if h.value_unavailable}
+        valued_lots = [
+            lot for lot in self.db.query(HoldingLot).all() if lot.id not in flagged_ids
+        ]
 
         total_nav = 0.0
         total_cost = 0.0
@@ -380,10 +471,10 @@ class PortfolioService:
             # Daily: most recent EOD snapshot before today; fall back up to 3
             # days back for weekends/holidays, using whichever cutoff matched.
             daily_cutoff = now - timedelta(days=1)
-            yesterday_nav = await self._get_nav_at_date(daily_cutoff)
+            yesterday_nav = await self._get_nav_at_date(daily_cutoff, holdings=valued_lots)
             if yesterday_nav is None:
                 daily_cutoff = now - timedelta(days=3)
-                yesterday_nav = await self._get_nav_at_date(daily_cutoff)
+                yesterday_nav = await self._get_nav_at_date(daily_cutoff, holdings=valued_lots)
 
             if yesterday_nav and yesterday_nav > 0:
                 daily_pnl = current_nav_of_lots_held_at(daily_cutoff) - yesterday_nav
@@ -391,14 +482,14 @@ class PortfolioService:
 
             # Weekly: ~7 calendar days back (covers 5 trading days)
             weekly_cutoff = now - timedelta(days=7)
-            weekly_nav = await self._get_nav_at_date(weekly_cutoff)
+            weekly_nav = await self._get_nav_at_date(weekly_cutoff, holdings=valued_lots)
             if weekly_nav and weekly_nav > 0:
                 weekly_delta = current_nav_of_lots_held_at(weekly_cutoff) - weekly_nav
                 weekly_pnl_percent = (weekly_delta / weekly_nav) * 100
 
             # Monthly: ~30 calendar days back (covers ~21 trading days)
             monthly_cutoff = now - timedelta(days=30)
-            monthly_nav = await self._get_nav_at_date(monthly_cutoff)
+            monthly_nav = await self._get_nav_at_date(monthly_cutoff, holdings=valued_lots)
             if monthly_nav and monthly_nav > 0:
                 monthly_delta = current_nav_of_lots_held_at(monthly_cutoff) - monthly_nav
                 monthly_pnl_percent = (monthly_delta / monthly_nav) * 100
@@ -426,22 +517,17 @@ class PortfolioService:
 
     async def _asset_usd_price_at(self, asset_id: str, when: datetime) -> Optional[float]:
         """Latest snapshot price for an asset on/before `when`, converted to USD.
-        None when the asset has no snapshot yet (so it can't be diffed)."""
-        snap = (
-            self.db.query(PriceSnapshot)
-            .filter(
-                PriceSnapshot.asset_id == asset_id,
-                PriceSnapshot.timestamp <= when,
-            )
-            .order_by(PriceSnapshot.timestamp.desc())
-            .first()
-        )
+        None when the asset has no snapshot yet (so it can't be diffed) or the
+        price has no USD rate."""
+        snap = self._latest_snapshot(asset_id, when)
         if snap is None:
             return None
         try:
-            return await self.fx_service.convert(snap.price, Currency(snap.currency), Currency.USD)
+            return await self.fx_service.convert(
+                snap.price, Currency(_currency_code(snap.currency)), Currency.USD
+            )
         except Exception:
-            return snap.price
+            return None
 
     async def compute_daily_snapshot(self, day: date_cls) -> Optional[PortfolioSnapshot]:
         """Compute and upsert the portfolio_snapshots row for `day`.
@@ -460,21 +546,57 @@ class PortfolioService:
         # The stored series is canonically USD regardless of the service's
         # configured base_currency.
         usd = PortfolioService(self.db, base_currency=Currency.USD)
+
+        # A stored row is permanent: if any held lot's cost or price has no
+        # USD rate, skip the day rather than write a NAV missing a holding.
+        missing = await usd._codes_without_usd_rate(holdings, end_of_day)
+        if missing:
+            logger.warning(
+                "skipping portfolio snapshot for %s: no FX rate for %s",
+                day, ", ".join(sorted(missing)),
+            )
+            return None
+
+        bought_today = [
+            lot for lot in holdings
+            if lot.purchase_date is not None
+            and _ensure_aware(lot.purchase_date).date() == day
+        ]
+        # A lot_currency_check lot's recorded cost is not in its labelled
+        # currency, so it can't enter net_flow. Its NAV (price-based) is fine,
+        # so only its purchase day is skipped.
+        # No live quote here: the latest stored price's currency stands in
+        # for it (an ILS price reveals a TASE asset still labelled USD).
+        unchecked = sorted({
+            lot.asset.symbol for lot in bought_today
+            if _is_lot_currency_check(lot, price_currency=self._latest_price_currency(
+                lot.asset_id, end_of_day))
+        })
+        if unchecked:
+            logger.warning(
+                "skipping portfolio snapshot for %s: lot currency check for %s",
+                day, ", ".join(unchecked),
+            )
+            return None
+
         nav = await usd._get_nav_at_date(end_of_day, holdings=holdings)
         if nav is None:
             return None
 
         net_flow = 0.0
-        for lot in holdings:
-            pd = lot.purchase_date
-            if pd is not None and _ensure_aware(pd).date() == day:
-                try:
-                    cost_usd = await usd.fx_service.convert(
-                        lot.avg_cost, Currency(lot.cost_currency), Currency.USD
-                    )
-                except Exception:
-                    cost_usd = lot.avg_cost
-                net_flow += cost_usd * lot.quantity
+        for lot in bought_today:
+            cost_code = _currency_code(lot.cost_currency)
+            try:
+                cost_usd = await usd.fx_service.convert(
+                    lot.avg_cost, Currency(cost_code), Currency.USD
+                )
+            except Exception:
+                logger.warning(
+                    "skipping portfolio snapshot for %s: no FX rate for %s",
+                    day, cost_code,
+                )
+                return None
+            net_flow += cost_usd * lot.quantity
 
         prev = (
             self.db.query(PortfolioSnapshot)
@@ -493,8 +615,22 @@ class PortfolioService:
                 # Only lots held at the previous close contribute today's move.
                 if pd is not None and _ensure_aware(pd) > prev_end:
                     continue
-                p_now = await usd._asset_usd_price_at(lot.asset_id, end_of_day)
-                p_prev = await usd._asset_usd_price_at(lot.asset_id, prev_end)
+                prices = []
+                for when in (end_of_day, prev_end):
+                    price = await usd._asset_usd_price_at(lot.asset_id, when)
+                    if price is None:
+                        snap = usd._latest_snapshot(lot.asset_id, when)
+                        if snap is not None:
+                            # A price exists but has no USD rate: dropping
+                            # the lot would store a partial daily_pnl.
+                            logger.warning(
+                                "skipping portfolio snapshot for %s: no FX rate for %s",
+                                day, _currency_code(snap.currency),
+                            )
+                            return None
+                    prices.append(price)
+                p_now, p_prev = prices
+                # No snapshot yet (history just begins): nothing to diff.
                 if p_now is None or p_prev is None:
                     continue
                 daily_pnl += lot.quantity * (p_now - p_prev)
@@ -512,6 +648,29 @@ class PortfolioService:
         self.db.commit()
         self.db.refresh(row)
         return row
+
+    async def _codes_without_usd_rate(
+        self, holdings: List[HoldingLot], end_of_day: datetime
+    ) -> set:
+        """Currency codes of lots held at `end_of_day` (cost currency, and the
+        currency of the latest price snapshot) that cannot be converted to USD."""
+        codes = set()
+        for lot in holdings:
+            pd = lot.purchase_date
+            if pd is not None and _ensure_aware(pd) > end_of_day:
+                continue
+            codes.add(_currency_code(lot.cost_currency))
+            snap = self._latest_snapshot(lot.asset_id, end_of_day)
+            if snap is not None:
+                codes.add(_currency_code(snap.currency))
+
+        missing = set()
+        for code in codes:
+            try:
+                await self.fx_service.convert(1.0, Currency(code), Currency.USD)
+            except Exception:
+                missing.add(code)
+        return missing
 
     async def backfill_daily_snapshots(self) -> int:
         """Build the daily series from every distinct date that has price
@@ -551,22 +710,35 @@ class PortfolioService:
             .all()
         )
 
-        async def to_display(usd_amount: float) -> float:
+        rate = 1.0
+        if self.base_currency != Currency.USD:
+            try:
+                rate = await self.fx_service.get_rate(Currency.USD, self.base_currency)
+            except Exception:
+                # Never show the USD series labelled as another currency.
+                logger.warning(
+                    "daily P&L series unavailable: no FX rate USD->%s",
+                    self.base_currency.value,
+                )
+                return {
+                    "base_currency": self.base_currency.value,
+                    "period": period,
+                    "points": [],
+                }
+
+        def to_display(usd_amount: float) -> float:
             if self.base_currency == Currency.USD:
                 return usd_amount
-            try:
-                return await self.fx_service.convert(usd_amount, Currency.USD, self.base_currency)
-            except Exception:
-                return usd_amount
+            return usd_amount * rate
 
         points = []
         for r in rows:
             points.append({
                 "date": r.date.isoformat(),
-                "nav": await to_display(r.nav),
-                "dailyPnL": await to_display(r.daily_pnl),
+                "nav": to_display(r.nav),
+                "dailyPnL": to_display(r.daily_pnl),
                 "dailyPnLPercent": r.daily_pnl_pct,
-                "netFlow": await to_display(r.net_flow),
+                "netFlow": to_display(r.net_flow),
             })
 
         return {

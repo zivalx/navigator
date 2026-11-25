@@ -32,6 +32,7 @@ export function SettingsPage() {
                 <SelectItem value="GBP">GBP - British Pound</SelectItem>
                 <SelectItem value="JPY">JPY - Japanese Yen</SelectItem>
                 <SelectItem value="CHF">CHF - Swiss Franc</SelectItem>
+                <SelectItem value="ILS">ILS - Israeli Shekel</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">

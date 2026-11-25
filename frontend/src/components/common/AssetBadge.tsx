@@ -16,7 +16,10 @@ export function AssetTypeBadge({ type, className }: AssetBadgeProps) {
     other: { label: 'Other', className: 'bg-muted/50 text-muted-foreground border-muted' },
   };
 
-  const { label, className: badgeClass } = config[type];
+  const { label, className: badgeClass } = config[type] ?? {
+    label: String(type),
+    className: 'bg-muted/50 text-muted-foreground border-muted',
+  };
 
   return (
     <Badge variant="outline" className={cn('text-xs font-medium', badgeClass, className)}>
@@ -32,16 +35,17 @@ interface RegionBadgeProps {
 
 export function RegionBadge({ region, className }: RegionBadgeProps) {
   const config: Record<MarketRegion, { label: string; flag: string }> = {
+    IL: { label: 'Israel', flag: '🇮🇱' },
     US: { label: 'US', flag: '🇺🇸' },
     EU: { label: 'EU', flag: '🇪🇺' },
     ASIA: { label: 'Asia', flag: '🌏' },
   };
 
-  const { label, flag } = config[region];
+  const { label, flag } = config[region] ?? { label: String(region), flag: '' };
 
   return (
     <Badge variant="outline" className={cn('text-xs font-medium gap-1', className)}>
-      <span>{flag}</span>
+      {flag && <span>{flag}</span>}
       {label}
     </Badge>
   );

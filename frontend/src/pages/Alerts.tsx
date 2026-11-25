@@ -31,7 +31,8 @@ import {
 import { EmptyState } from '@/components/common/EmptyState';
 import { TableRowSkeleton } from '@/components/common/LoadingSkeleton';
 import { CreateAlertDialog } from '@/components/alerts/CreateAlertDialog';
-import { formatMoney, formatTrail, ruleVerb } from '@/components/alerts/alertUtils';
+import { formatTrail, ruleVerb } from '@/components/alerts/alertUtils';
+import { formatMoney } from '@/lib/utils';
 import { api } from '@/lib/api';
 import type { PriceAlert } from '@/lib/types';
 
@@ -66,7 +67,7 @@ function ruleCell(alert: PriceAlert) {
     <>
       Trailing stop {formatTrail(alert)}
       {alert.isActive && alert.highWaterMark != null && (
-        <span className="block text-xs">high {formatMoney(alert.highWaterMark)}</span>
+        <span className="block text-xs">high {formatMoney(alert.highWaterMark, alert.currency || 'USD')}</span>
       )}
     </>
   );
@@ -75,9 +76,9 @@ function ruleCell(alert: PriceAlert) {
 /** Level cell: static threshold, or the current derived stop for a TSL. */
 function levelCell(alert: PriceAlert) {
   if (alert.rule !== 'trailing_stop') {
-    return alert.threshold != null ? formatMoney(alert.threshold) : '—';
+    return alert.threshold != null ? formatMoney(alert.threshold, alert.currency || 'USD') : '—';
   }
-  return alert.currentStopPrice != null ? formatMoney(alert.currentStopPrice) : '—';
+  return alert.currentStopPrice != null ? formatMoney(alert.currentStopPrice, alert.currency || 'USD') : '—';
 }
 
 const Alerts = () => {

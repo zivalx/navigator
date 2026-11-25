@@ -15,6 +15,7 @@ class MarketRegion(str, Enum):
     US = "US"
     EU = "EU"
     ASIA = "ASIA"
+    IL = "IL"
 
 
 class Currency(str, Enum):
@@ -23,15 +24,28 @@ class Currency(str, Enum):
     GBP = "GBP"
     JPY = "JPY"
     CHF = "CHF"
+    ILS = "ILS"
+    HKD = "HKD"
+    CNY = "CNY"
+    KRW = "KRW"
+    TWD = "TWD"
+    SGD = "SGD"
+    INR = "INR"
+    SEK = "SEK"
+    DKK = "DKK"
+    NOK = "NOK"
+    AUD = "AUD"
+    CAD = "CAD"
+    ZAR = "ZAR"
 
 
 class AssetBase(BaseModel):
     symbol: str
     name: str
     exchange: Optional[str] = None
-    currency: Currency
+    currency: Optional[Currency] = None
     asset_type: AssetType = Field(alias="assetType")
-    market_region: MarketRegion = Field(alias="marketRegion")
+    market_region: Optional[MarketRegion] = Field(default=None, alias="marketRegion")
     provider_ids: Optional[Dict[str, str]] = Field(default=None, alias="providerIds")
 
     class Config:
@@ -59,6 +73,8 @@ class AssetUpdate(BaseModel):
 
 class Asset(AssetBase):
     id: str
+    currency: Currency
+    market_region: MarketRegion = Field(alias="marketRegion")
 
     class Config:
         from_attributes = True

@@ -1,6 +1,14 @@
 from typing import Dict, List, Optional
 from datetime import datetime
+
 from .base import BaseProvider
+
+
+def _normalize(code):
+    # Imported lazily: app.services' package init imports the providers.
+    from ..services.currency_units import normalize_quote_currency
+
+    return normalize_quote_currency(code)
 
 
 class YahooFinanceProvider(BaseProvider):
@@ -45,10 +53,17 @@ class YahooFinanceProvider(BaseProvider):
             raise ValueError(f"No Yahoo data for {symbol}")
 
         meta = result[0].get("meta", {})
+        currency, factor = _normalize(meta.get("currency"))
         price = meta.get("regularMarketPrice", 0)
         prev_close = meta.get("chartPreviousClose", meta.get("previousClose", 0))
-        change = round(price - prev_close, 2) if prev_close else 0
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
+        # Percentage is computed in the raw unit so it is unaffected by the factor.
+        raw_change = round(price - prev_close, 2) if prev_close else 0
+        change_pct = round((raw_change / prev_close) * 100, 2) if prev_close else 0
+        if factor == 1.0:
+            change = raw_change
+        else:
+            price = round(price * factor, 6)
+            change = round(raw_change * factor, 6)
 
         return {
             "symbol": symbol.upper(),
@@ -56,9 +71,35 @@ class YahooFinanceProvider(BaseProvider):
             "change": change,
             "changePercent": change_pct,
             "timestamp": datetime.now().isoformat(),
-            "currency": meta.get("currency", "USD"),
+            "currency": currency,
+            "unitFactor": factor,
             "exchange": meta.get("fullExchangeName", meta.get("exchangeName", "")),
             "source": "yahoo",
+        }
+
+    async def get_chart_meta(self, symbol: str) -> Optional[Dict]:
+        """Chart metadata (normalized currency, venue). None if Yahoo has no data.
+
+        Raises httpx.HTTPError on network failure.
+        """
+        url = self.QUERY_URL.format(symbol=symbol.upper())
+        response = await self.client.get(
+            url, params={"interval": "1d", "range": "1d"}, headers=self.HEADERS
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        result = response.json().get("chart", {}).get("result")
+        if not result:
+            return None
+        meta = result[0].get("meta", {})
+        currency, factor = _normalize(meta.get("currency"))
+        return {
+            "currency": currency,
+            "unitFactor": factor,
+            "exchangeName": meta.get("exchangeName"),
+            "fullExchangeName": meta.get("fullExchangeName"),
+            "instrumentType": meta.get("instrumentType"),
         }
 
     async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
@@ -165,7 +206,9 @@ class YahooFinanceProvider(BaseProvider):
                 "name": quote.get("shortname") or quote.get("longname", ""),
                 "exchange": quote.get("exchange", ""),
                 "asset_type": asset_type,
-                "currency": quote.get("currency", "USD"),
+                # Search hits carry no currency; never invent one (the
+                # quote / asset record is the source of truth).
+                "currency": quote.get("currency"),
             })
 
         return results

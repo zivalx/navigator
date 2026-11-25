@@ -9,6 +9,7 @@ from ..schemas.asset import Currency
 from ..models.price import FxRate
 from ..cache import cache
 from ..config import settings
+from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class FxService:
 
             return rate
         except Exception as e:
-            logger.warning("FALLBACK [FX %s→%s]: API failed (%s), trying DB cache", from_currency.value, to_currency.value, e)
+            logger.warning("FALLBACK [FX %s→%s]: API failed (%s), trying DB cache", from_currency.value, to_currency.value, redact_secrets(e))
             # Fallback to database
             fx_rate = self.db.query(FxRate).filter(
                 FxRate.base_currency == from_currency,

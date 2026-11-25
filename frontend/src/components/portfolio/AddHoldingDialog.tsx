@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { usePortfolio } from '@/contexts/PortfolioContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,6 +17,7 @@ import {
 import { Plus, Upload, AlertCircle, CheckCircle, Home, Wallet } from 'lucide-react';
 import { Currency, AssetType } from '@/lib/types';
 import { api } from '@/lib/api';
+import { formatMoney, currencySymbol } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export function AddHoldingDialog() {
@@ -40,6 +41,31 @@ export function AddHoldingDialog() {
   const [otherAccountName, setOtherAccountName] = useState('');
   const [otherPurchaseDate, setOtherPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
   const [otherCurrency, setOtherCurrency] = useState<Currency>('USD');
+
+  const selectedAsset = assets.find(a => a.symbol.toUpperCase() === symbol.toUpperCase());
+  const selectedSymbol = selectedAsset?.symbol;
+  const [quotePrice, setQuotePrice] = useState<number | null>(null);
+
+  useEffect(() => {
+    setQuotePrice(null);
+    if (!selectedSymbol) return;
+    let cancelled = false;
+    api.getQuote(selectedSymbol)
+      .then(q => {
+        const p = Number(q?.price);
+        if (!cancelled && p > 0) setQuotePrice(p);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedSymbol]);
+
+  const minorUnitHint =
+    selectedAsset?.currency === 'ILS' ? 'price per share in shekels (₪), not agorot'
+    : selectedAsset?.currency === 'GBP' ? 'price per share in pounds (£), not pence'
+    : null;
+  const enteredCost = parseFloat(avgCost);
+  const ratio = quotePrice && enteredCost > 0 ? enteredCost / quotePrice : null;
+  const looksLikeMinorUnits = ratio !== null && ratio >= 50 && ratio <= 200;
 
   const handleSubmitAsset = () => {
     setError('');
@@ -195,15 +221,32 @@ export function AddHoldingDialog() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="avgCost">Avg Cost</Label>
-                <Input
-                  id="avgCost"
-                  type="number"
-                  placeholder="150.00"
-                  value={avgCost}
-                  onChange={(e) => setAvgCost(e.target.value)}
-                />
+                <div className="relative">
+                  {selectedAsset && (
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">
+                      {currencySymbol(selectedAsset.currency)}
+                    </span>
+                  )}
+                  <Input
+                    id="avgCost"
+                    type="number"
+                    placeholder="150.00"
+                    className={selectedAsset ? 'pl-8' : undefined}
+                    value={avgCost}
+                    onChange={(e) => setAvgCost(e.target.value)}
+                  />
+                </div>
               </div>
             </div>
+            {minorUnitHint && (
+              <p className="text-xs text-muted-foreground -mt-2">{minorUnitHint}</p>
+            )}
+            {looksLikeMinorUnits && (
+              <p className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 -mt-2">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                This is about 100× the current price — did you enter agorot/pence?
+              </p>
+            )}
             <div className="space-y-2">
               <Label htmlFor="purchaseDate">Purchase Date</Label>
               <Input
@@ -285,7 +328,9 @@ export function AddHoldingDialog() {
                     <SelectItem value="USD">USD</SelectItem>
                     <SelectItem value="EUR">EUR</SelectItem>
                     <SelectItem value="GBP">GBP</SelectItem>
+                    <SelectItem value="JPY">JPY</SelectItem>
                     <SelectItem value="CHF">CHF</SelectItem>
+                    <SelectItem value="ILS">ILS</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -481,7 +526,7 @@ export function CSVImportDialog() {
                       )}
                       <span className="font-semibold">{h.symbol}</span>
                       <span className="text-muted-foreground">
-                        {h.quantity} @ ${h.avgCost}
+                        {h.quantity} @ {h.costCurrency ? formatMoney(h.avgCost, h.costCurrency) : h.avgCost}
                       </span>
                     </div>
                     {!h.valid && (

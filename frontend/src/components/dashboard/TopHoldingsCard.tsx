@@ -3,7 +3,7 @@ import { PriceDisplay, PercentChange, CurrencyDisplay } from '@/components/commo
 import { Sparkline } from '@/components/common/Sparkline';
 import { AssetTypeBadge } from '@/components/common/AssetBadge';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
-import { cn } from '@/lib/utils';
+import { cn, formatMoney } from '@/lib/utils';
 
 export function TopHoldingsCard() {
   const { topHoldings, baseCurrency } = usePortfolio();
@@ -84,7 +84,7 @@ export function TopMoversCard() {
                   <span className="font-semibold text-sm">{mover.asset.symbol}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-mono text-sm">${mover.price.toFixed(2)}</span>
+                  <span className="font-mono text-sm">{formatMoney(mover.price, mover.asset.currency || 'USD')}</span>
                   <PercentChange value={mover.changePercent} size="sm" className="ml-2" />
                 </div>
               </div>
@@ -110,7 +110,7 @@ export function TopMoversCard() {
                   <span className="font-semibold text-sm">{mover.asset.symbol}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-mono text-sm">${mover.price.toFixed(2)}</span>
+                  <span className="font-mono text-sm">{formatMoney(mover.price, mover.asset.currency || 'USD')}</span>
                   <PercentChange value={mover.changePercent} size="sm" className="ml-2" />
                 </div>
               </div>
