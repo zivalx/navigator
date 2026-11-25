@@ -2,7 +2,11 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# Optional local-only build secret `corp_ca` (corporate root CA for a TLS-inspecting proxy): used
+# inside this RUN step only (node appends it to its roots), never copied into a layer.
+RUN --mount=type=secret,id=corp_ca,required=false \
+    if [ -s /run/secrets/corp_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/corp_ca; fi; \
+    npm ci
 COPY . .
 RUN npm run build
 

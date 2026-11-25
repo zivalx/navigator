@@ -70,6 +70,15 @@ class MarketDataService:
                 provider_used = "coingecko"
             except Exception as e:
                 errors.append(f"CoinGecko: {redact_secrets(e)}")
+            if not quote:
+                # Yahoo crypto pair; the quote keeps the caller's symbol.
+                yahoo_symbol = symbol.upper() if "-" in symbol else f"{symbol.upper()}-USD"
+                try:
+                    quote = await self.yahoo.get_quote(yahoo_symbol)
+                    quote["symbol"] = symbol.upper()
+                    provider_used = "yahoo"
+                except Exception as e:
+                    errors.append(f"Yahoo: {redact_secrets(e)}")
 
         # For stocks/ETFs/indices: Yahoo first (free, always available)
         if not quote and asset_type in ["stock", "etf", "index"]:
@@ -177,7 +186,7 @@ class MarketDataService:
             self.db.commit()
         except Exception as exc:
             # Don't fail if we can't store - just skip
-            logger.warning("could not store price snapshot for %s: %s", symbol, exc)
+            logger.warning("could not store price snapshot for %s: %s", symbol, redact_secrets(exc))
             self.db.rollback()
 
     async def _fetch_and_cache_movers(self) -> None:

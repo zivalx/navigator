@@ -1,5 +1,8 @@
+name: navigator
+
 services:
   postgres:
+    container_name: navigator-postgres
     image: postgres:15-alpine
     restart: unless-stopped
     environment:
@@ -18,13 +21,16 @@ services:
     mem_limit: 512m
 
   redis:
+    container_name: navigator-redis
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,6 +39,7 @@ services:
     mem_limit: 256m
 
   api:
+    container_name: navigator-api
     build:
       context: ./backend
       dockerfile: Dockerfile.prod
@@ -56,9 +63,11 @@ services:
       start_period: 30s
     networks:
       - navigator-net
+    stop_grace_period: 30s
     mem_limit: 512m
 
   frontend:
+    container_name: navigator-frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -67,53 +76,33 @@ services:
       - frontend_build:/usr/share/nginx/html
 
   nginx:
+    container_name: navigator-nginx
     image: nginx:1.25-alpine
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
     depends_on:
       api:
         condition: service_healthy
       frontend:
         condition: service_completed_successfully
-    environment:
-      DOMAIN: ${DOMAIN}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
-      # HTTP Basic Auth credentials — MUST be created on the host before
-      # `docker compose up` (see TODO-DEPLOYMENT.md 3.3), or Docker will create
-      # a directory here and nginx will fail to start.
-      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
       - frontend_build:/usr/share/nginx/html:ro
-      - certbot_conf:/etc/letsencrypt:ro
-      - certbot_www:/var/www/certbot:ro
-    command: >
-      /bin/sh -c 'envsubst "\$${DOMAIN}" < /etc/nginx/conf.d/default.conf.template
-      > /etc/nginx/conf.d/default.conf && nginx -g "daemon off;"'
+    # No published ports: TLS and basic auth live at the edge Caddy (zivalx-ops),
+    # which reaches this container as navigator-nginx:80 over the external edge network.
     networks:
       - navigator-net
+      - edge
     mem_limit: 128m
-
-  certbot:
-    image: certbot/certbot:v3.1.0
-    restart: unless-stopped
-    volumes:
-      - certbot_conf:/etc/letsencrypt
-      - certbot_www:/var/www/certbot
-    entrypoint: >
-      /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'
-    networks:
-      - navigator-net
 
 networks:
   navigator-net:
     driver: bridge
+  edge:
+    external: true
+    name: edge
 
 volumes:
   pg_data:
   redis_data:
   frontend_build:
-  certbot_conf:
-  certbot_www:

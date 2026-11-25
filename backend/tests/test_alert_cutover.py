@@ -7,8 +7,16 @@ import pytest
 from app.models.alert import AlertRule
 from app.models.asset import Currency, MarketRegion
 from app.models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, set_marker
+from app.services.sessions import QuoteBatchError
 from app.tasks import scheduler as scheduler_module
-from tests.factories import make_alert, make_asset, make_tsl, patch_quotes, reload_alert
+from tests.factories import (
+    _with_alertable_defaults,
+    make_alert,
+    make_asset,
+    make_tsl,
+    patch_quotes,
+    reload_alert,
+)
 
 T = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 
@@ -40,11 +48,13 @@ async def test_pre_cutover_alert_paused_on_stale_quote(eval_db, monkeypatch, cap
     set_marker(eval_db, CUTOVER_MARKER, at=T)
     aid = _setup(eval_db, T - timedelta(hours=1))
     patch_quotes(monkeypatch, {"TEVA.TA": {"price": 26.0, "stale": True}})
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING), pytest.raises(QuoteBatchError):
         await scheduler_module.evaluate_price_alerts()
     a = reload_alert(eval_db, aid)
     assert a.is_active and a.triggered_at is None
-    assert any("TEVA.TA" in r.getMessage() for r in caplog.records)
+    # a stale quote now hits the non-alertable skip, ahead of the cutover pause
+    assert any("non-alertable" in r.getMessage() and "stale=1" in r.getMessage()
+               for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -119,7 +129,7 @@ async def test_conversion_committed_during_fetch_does_not_unpause_stale_rows(eva
         audit.get(PriceAlert, aid).threshold = 25.0
         set_marker(audit, ALERTS_CONVERTED_MARKER)
         audit.close()
-        return {"TEVA.TA": {"price": 26.0, "unitFactor": 0.01}}
+        return {"TEVA.TA": _with_alertable_defaults({"price": 26.0, "unitFactor": 0.01})}
 
     monkeypatch.setattr(MarketDataService, "get_quotes", fetch_while_audit_applies)
     await scheduler_module.evaluate_price_alerts()

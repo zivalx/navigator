@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .base import BaseProvider
 
@@ -84,12 +84,21 @@ class YahooFinanceProvider(BaseProvider):
             price = round(price * factor, 6)
             change = round(raw_change * factor, 6)
 
+        rmt = meta.get("regularMarketTime")
+        market_time = (
+            datetime.fromtimestamp(rmt, tz=timezone.utc).isoformat()
+            if isinstance(rmt, (int, float)) and rmt
+            else None
+        )
+
         return {
             "symbol": symbol.upper(),
             "price": price,
             "change": change,
             "changePercent": change_pct,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "marketTime": market_time,
+            "exchangeTimezone": meta.get("exchangeTimezoneName"),
             "currency": currency,
             "unitFactor": factor,
             "exchange": meta.get("fullExchangeName", meta.get("exchangeName", "")),

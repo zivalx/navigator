@@ -6,6 +6,7 @@ from .news import NewsItem
 from .alert import PriceAlert, AlertRule
 from .portfolio_snapshot import PortfolioSnapshot
 from .maintenance import MaintenanceRun
+from .job_heartbeat import JobHeartbeat
 
 __all__ = [
     "Asset",
@@ -20,4 +21,5 @@ __all__ = [
     "AlertRule",
     "PortfolioSnapshot",
     "MaintenanceRun",
+    "JobHeartbeat",
 ]

@@ -4,6 +4,7 @@ Uses an in-memory SQLite DB. SQLite has no native ARRAY type, so we teach
 it to compile `HoldingLot.tags` (a Postgres ARRAY column in production) as
 a JSON column purely for test purposes - no production model changes.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from sqlalchemy.pool import StaticPool
 # Ensure `app` package is importable when running pytest from the backend/ dir.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# `app.database` builds its engine from settings at import time, and the setting's
+# default (and a developer's .env) points at localhost:5432, where a real database
+# may be listening. Pin it BEFORE `app` is imported: in-memory SQLite, or the pg
+# lane's throwaway server when TEST_POSTGRES_URL is set.
+os.environ["DATABASE_URL"] = os.environ.get("TEST_POSTGRES_URL") or "sqlite://"
+
 
 @compiles(ARRAY, "sqlite")
 def _compile_array_as_json_for_sqlite(element, compiler, **kw):
@@ -24,7 +31,7 @@ def _compile_array_as_json_for_sqlite(element, compiler, **kw):
 
 from app.database import Base  # noqa: E402
 # Import all models so they're registered on Base.metadata before create_all.
-from app.models import asset, holding, price, watchlist, news, alert, portfolio_snapshot, maintenance  # noqa: E402,F401
+from app.models import asset, holding, price, watchlist, news, alert, portfolio_snapshot, maintenance, job_heartbeat  # noqa: E402,F401
 
 
 @pytest.fixture()
@@ -104,3 +111,13 @@ def eval_db(db_session, monkeypatch):
 
     monkeypatch.setattr(scheduler_module, "SessionLocal", lambda: db_session)
     return db_session
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _never_the_default_postgres():
+    """Fail the whole run if the app's engine could reach localhost:5432."""
+    from app.database import engine
+
+    url = engine.url
+    if url.host in ("localhost", "127.0.0.1", "::1") and (url.port or 5432) == 5432:
+        pytest.fail("tests must never use a database on localhost:5432", pytrace=False)

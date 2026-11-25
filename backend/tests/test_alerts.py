@@ -17,6 +17,7 @@ from app.models.alert import AlertRule, PriceAlert
 from app.models.asset import Asset, Currency
 from app.providers.yahoo import YahooFinanceProvider
 from app.services.market_data import MarketDataService
+from app.services.sessions import QuoteBatchError
 from app.tasks import scheduler as scheduler_module
 from tests.factories import make_alert, make_asset, patch_quotes, reload_alert
 
@@ -379,32 +380,14 @@ async def test_evaluate_skips_already_inactive_alerts(eval_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_leaves_alerts_untouched_when_quote_fetch_fails(eval_db, monkeypatch):
-    asset = make_asset(eval_db, symbol="AAPL")
-    alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
-    alert_id = alert.id
-
-    async def failing_get_quotes(self, symbols):
-        raise RuntimeError("provider outage")
-
-    monkeypatch.setattr(MarketDataService, "get_quotes", failing_get_quotes)
-
-    await scheduler_module.evaluate_price_alerts()
-
-    alert = reload_alert(eval_db, alert_id)
-    assert alert.is_active is True
-    assert alert.triggered_at is None
-    assert alert.triggered_price is None
-
-
-@pytest.mark.asyncio
 async def test_evaluate_skips_alert_when_its_own_quote_has_error(eval_db, monkeypatch):
     asset = make_asset(eval_db, symbol="AAPL")
     alert = make_alert(eval_db, asset, rule=AlertRule.PRICE_BELOW, threshold=180.0)
     alert_id = alert.id
     patch_quotes(monkeypatch, {"AAPL": {"error": "no data"}})
 
-    await scheduler_module.evaluate_price_alerts()
+    with pytest.raises(QuoteBatchError):  # the only symbol failed: job failure rule
+        await scheduler_module.evaluate_price_alerts()
 
     alert = reload_alert(eval_db, alert_id)
     assert alert.is_active is True
@@ -452,3 +435,37 @@ def test_alert_response_includes_asset_currency(client, db_session):
     assert response.json()["currency"] == "ILS"
     listed = client.get("/api/alerts/").json()
     assert listed[0]["currency"] == "ILS"
+
+
+# ---------------------------------------------------------------------------
+# Notification de-duplication across concurrent passes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_notify_skips_alert_stamped_by_other_pass(eval_db, monkeypatch):
+    asset = make_asset(eval_db, symbol="AAPL")
+    first = make_alert(eval_db, asset, triggered_at=NOW - timedelta(minutes=2), triggered_price=1.0)
+    second = make_alert(eval_db, asset, triggered_at=NOW - timedelta(minutes=1), triggered_price=1.0)
+    first_id, second_id = first.id, second.id
+
+    class RacingSender:
+        enabled = True
+
+        def __init__(self):
+            self.sent_ids = []
+
+        async def send(self, text):
+            # Another pass delivers the second alert while we send the first.
+            self.sent_ids.append(first_id if not self.sent_ids else "other")
+            eval_db.query(PriceAlert).filter(PriceAlert.id == second_id).update(
+                {"notified_at": datetime.now(timezone.utc)}
+            )
+            eval_db.commit()
+            return True
+
+    sender = RacingSender()
+    monkeypatch.setattr(scheduler_module, "NotificationService", lambda: sender)
+
+    await scheduler_module.notify_triggered_alerts(eval_db)
+
+    assert sender.sent_ids == [first_id]

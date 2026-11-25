@@ -189,3 +189,47 @@ async def test_snapshot_store_failure_logs_warning(db_session, monkeypatch, capl
         and "db exploded" in r.getMessage()
         for r in caplog.records
     )
+
+
+def _crypto_service(db, monkeypatch, symbol):
+    async def _fail(*a, **k):
+        raise RuntimeError("down")
+
+    async def _miss(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.market_data.cache.get", _miss)
+    monkeypatch.setattr("app.services.market_data.cache.set", _miss)
+    asset = Asset(
+        id=str(uuid.uuid4()), symbol=symbol, name=symbol, exchange="CRYPTO",
+        currency=Currency.USD, asset_type=AssetType.CRYPTO, market_region=MarketRegion.US,
+    )
+    db.add(asset)
+    db.commit()
+    service = MarketDataService(db)
+    monkeypatch.setattr(service.coingecko, "get_quote", _fail)
+    asked = []
+
+    async def _yahoo(sym):
+        asked.append(sym)
+        return {"symbol": sym, "price": 1.0, "currency": "USD"}
+
+    monkeypatch.setattr(service.yahoo, "get_quote", _yahoo)
+    return service, asked
+
+
+@pytest.mark.asyncio
+async def test_crypto_falls_back_to_yahoo_usd_pair(db_session, monkeypatch):
+    service, asked = _crypto_service(db_session, monkeypatch, "BTC")
+    quote = await service.get_quote("BTC")
+    assert asked == ["BTC-USD"]
+    assert quote["source"] == "yahoo"
+    assert quote["symbol"] == "BTC"
+
+
+@pytest.mark.asyncio
+async def test_yahoo_crypto_fallback_does_not_double_suffix(db_session, monkeypatch):
+    service, asked = _crypto_service(db_session, monkeypatch, "BTC-USD")
+    quote = await service.get_quote("BTC-USD")
+    assert asked == ["BTC-USD"]
+    assert quote["symbol"] == "BTC-USD"
