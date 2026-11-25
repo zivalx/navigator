@@ -3,7 +3,7 @@ import { Search, Star, Loader2, Check } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { api, buildCreateAssetPayload, assetCreateErrorMessage } from '@/lib/api';
 import { usePortfolio } from '@/contexts/PortfolioContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { cn, exchangeLabel } from '@/lib/utils';
 
