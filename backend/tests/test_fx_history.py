@@ -1,12 +1,16 @@
+import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.models import FxDailyRate
-from app.models.asset import Currency
+from app.models.asset import Asset, AssetType, Currency, MarketRegion
+from app.models.holding import HoldingLot
 from app.providers.yahoo import YahooFinanceProvider
+from app.services.fx import FxService
+from app.services.fx_history import refresh_fx_history
 
 
 def _row(day, per_usd):
@@ -69,6 +73,30 @@ async def test_get_fx_history_parses_closes():
 
 
 @pytest.mark.asyncio
+async def test_get_fx_history_dates_bar_in_exchange_timezone():
+    # Summer London midnight bar = 23:00 UTC the previous day.
+    body = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"exchangeTimezoneName": "Europe/London"},
+                    "timestamp": [1782860400],
+                    "indicators": {"quote": [{"close": [3.5]}]},
+                }
+            ]
+        }
+    }
+
+    async def fake_get(url, params=None, headers=None):
+        return _Resp(body)
+
+    provider = YahooFinanceProvider()
+    provider.client.get = fake_get
+    result = await provider.get_fx_history("ILS", date(2026, 6, 30), date(2026, 7, 1))
+    assert result == [(date(2026, 7, 1), 3.5)]
+
+
+@pytest.mark.asyncio
 async def test_get_fx_history_empty_raises():
     async def fake_get(url, params=None, headers=None):
         return _Resp({"chart": {"result": None}})
@@ -80,10 +108,6 @@ async def test_get_fx_history_empty_raises():
 
 
 # ---- FxService.get_rate_at / convert_at ----
-
-import logging
-
-from app.services.fx import FxService
 
 MON = date(2026, 11, 23)
 FRI = date(2026, 11, 20)
@@ -207,12 +231,6 @@ async def test_get_fx_history_skips_nonpositive_and_null_chart():
 
 
 # ---- refresh_fx_history ----
-
-from datetime import timedelta
-
-from app.models.asset import Asset, AssetType, MarketRegion
-from app.models.holding import HoldingLot
-from app.services.fx_history import refresh_fx_history
 
 TODAY = date(2026, 11, 25)
 NON_USD = [c for c in Currency if c != Currency.USD]

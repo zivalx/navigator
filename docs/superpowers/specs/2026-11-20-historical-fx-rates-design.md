@@ -58,7 +58,7 @@ currency gains and losses, the way a bank or broker statement shows them.
 `YahooProvider.get_fx_history(currency, start: date, end: date) -> list[(date, per_usd)]`
 calls the chart API for `{CCY}=X` with `interval=1d&period1&period2`. Verified 2026-11-20:
 `ILS=X` ≈ 3.33 and `EUR=X` ≈ 0.91, i.e. `{CCY}=X` is CCY per 1 USD for every currency.
-Timestamps are 00:00 UTC, so the row date is the UTC date. `None` closes are skipped.
+Bars are midnight in the exchange timezone (Europe/London; 23:00 UTC the previous day in summer), so the row date is the bar date in that timezone (`meta.exchangeTimezoneName`). `None` closes are skipped.
 
 ### Refresh — `app/services/fx_history.py`
 

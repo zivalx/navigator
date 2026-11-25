@@ -74,6 +74,7 @@ async def refresh_fx_history(
                     )
                 }
                 now = datetime.now(timezone.utc)
+                count = 0
                 for day, per_usd in rows:
                     row = existing.get(day)
                     if row is not None:
@@ -89,8 +90,9 @@ async def refresh_fx_history(
                         )
                         db.add(row)
                         existing[day] = row
-                    total += 1
+                    count += 1
                 db.commit()
+                total += count
             except Exception as e:
                 db.rollback()
                 logger.warning("FX history: %s failed (%s)", currency.value, redact_secrets(e))

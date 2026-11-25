@@ -1,3 +1,4 @@
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Dict, List, Optional
 from datetime import date, datetime, timedelta, timezone
 
@@ -180,8 +181,15 @@ class YahooFinanceProvider(BaseProvider):
 
         timestamps = result[0].get("timestamp") or []
         closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close") or []
+        # Bars are midnight in the exchange's timezone (Europe/London), which is
+        # 23:00 UTC the previous day in summer; date them in that timezone.
+        meta = result[0].get("meta") or {}
+        try:
+            tz = ZoneInfo(meta.get("exchangeTimezoneName") or "UTC")
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = timezone.utc
         rows = [
-            (datetime.fromtimestamp(ts, timezone.utc).date(), float(close))
+            (datetime.fromtimestamp(ts, tz).date(), float(close))
             for ts, close in zip(timestamps, closes)
             if close is not None and close > 0
         ]

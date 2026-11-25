@@ -117,7 +117,7 @@ enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_mig
 
 ## Gotchas
 
-- **Daily FX history** lives in `fx_daily_rates` (units of CCY per USD, UTC bar date),
+- **Daily FX history** lives in `fx_daily_rates` (units of CCY per USD, bar date in the exchange timezone, Europe/London),
   refreshed at startup and in the EOD job. Stored `portfolio_snapshots` rows use strict
   historical rates and skip a day with no rate (never today's); live views fall back to
   today's rate with a warning. Lot cost uses the purchase-date rate. The `fx_history_rebuild`

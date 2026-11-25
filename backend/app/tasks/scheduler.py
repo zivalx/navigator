@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -103,9 +103,9 @@ async def snapshot_eod_prices() -> None:
             svc = PortfolioService(db, base_currency=Currency.USD)
             await svc.compute_daily_snapshot(datetime.now(timezone.utc).date())
         except Exception as e:
-            logger.warning("Daily portfolio snapshot failed: %s", e)
+            logger.warning("Daily portfolio snapshot failed: %s", type(e).__name__)
     except Exception as e:
-        logger.error("EOD snapshot job error: %s", e)
+        logger.error("EOD snapshot job error: %s", type(e).__name__)
     finally:
         db.close()
 
@@ -119,6 +119,34 @@ async def _refresh_fx_history_safely(db) -> None:
         logger.warning("FX history refresh failed: %s", type(e).__name__)
 
 
+def _fx_coverage_gaps(db, today) -> set:
+    """Non-USD currency codes whose fx_daily_rates do not span the stored price
+    history: a row on/before (earliest snapshot + 7 days) and on/after (today - 7)."""
+    codes = set()
+    for col in (HoldingLot.cost_currency, PriceSnapshot.currency):
+        for (ccy,) in db.query(col).distinct():
+            code = getattr(ccy, "value", ccy)
+            if code and code != Currency.USD.value:
+                codes.add(code)
+    if not codes:
+        return set()
+    earliest_ts = db.query(func.min(PriceSnapshot.timestamp)).scalar()
+    early_limit = (
+        earliest_ts.date() + timedelta(days=7) if earliest_ts is not None else None
+    )
+    late_limit = today - timedelta(days=7)
+    gaps = set()
+    for code in codes:
+        q = db.query(FxDailyRate.id).filter(FxDailyRate.currency == Currency(code))
+        has_late = q.filter(FxDailyRate.date >= late_limit).first() is not None
+        has_early = early_limit is None or (
+            q.filter(FxDailyRate.date <= early_limit).first() is not None
+        )
+        if not (has_late and has_early):
+            gaps.add(code)
+    return gaps
+
+
 async def backfill_daily_snapshots_job() -> None:
     """Keep FX history current; rebuild the stored P&L series once at the
     historical rates, otherwise populate portfolio_snapshots if empty."""
@@ -130,9 +158,24 @@ async def backfill_daily_snapshots_job() -> None:
 
         has_fx = db.query(FxDailyRate.id).first() is not None
         if has_fx and get_marker(db, FX_REBUILD_MARKER) is None:
-            db.query(PortfolioSnapshot).delete()
+            gaps = _fx_coverage_gaps(db, datetime.now(timezone.utc).date())
+            if gaps:
+                logger.warning(
+                    "Skipping P&L rebuild: FX history does not cover %s",
+                    ", ".join(sorted(gaps)),
+                )
+                return
+            had_prices = db.query(PriceSnapshot.id).first() is not None
+            written_days: set = set()
+            written = await svc.backfill_daily_snapshots(written_days=written_days)
+            if had_prices and written == 0:
+                logger.warning("Skipping P&L rebuild marker: no snapshot rows were written")
+                return
+            # Upsert first, then drop only rows this rebuild did not rewrite.
+            for row in db.query(PortfolioSnapshot).all():
+                if row.date not in written_days:
+                    db.delete(row)
             db.commit()
-            written = await svc.backfill_daily_snapshots()
             set_marker(db, FX_REBUILD_MARKER)
             logger.info("Daily P&L series rebuilt at historical FX: %d rows", written)
             return
@@ -143,7 +186,7 @@ async def backfill_daily_snapshots_job() -> None:
         logger.info("Daily P&L backfill wrote %d rows", written)
     except Exception as e:
         db.rollback()
-        logger.error("Daily P&L backfill error: %s", e)
+        logger.error("Daily P&L backfill error: %s", type(e).__name__)
     finally:
         db.close()
 

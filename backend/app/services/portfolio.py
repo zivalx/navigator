@@ -544,7 +544,9 @@ class PortfolioService:
         except Exception:
             return None
 
-    async def compute_daily_snapshot(self, day: date_cls) -> Optional[PortfolioSnapshot]:
+    async def compute_daily_snapshot(
+        self, day: date_cls, usd: Optional["PortfolioService"] = None
+    ) -> Optional[PortfolioSnapshot]:
         """Compute and upsert the portfolio_snapshots row for `day`.
 
         NAV is the USD portfolio value at end of `day`. daily_pnl is the sum of
@@ -560,7 +562,8 @@ class PortfolioService:
 
         # The stored series is canonically USD regardless of the service's
         # configured base_currency.
-        usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
+        if usd is None:
+            usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
 
         # A stored row is permanent: if any held lot's cost or price has no
         # USD rate, skip the day rather than write a NAV missing a holding.
@@ -691,7 +694,7 @@ class PortfolioService:
                 missing.add(code)
         return missing
 
-    async def backfill_daily_snapshots(self) -> int:
+    async def backfill_daily_snapshots(self, written_days: Optional[set] = None) -> int:
         """Build the daily series from every distinct date that has price
         snapshots, oldest first. Idempotent (compute_daily_snapshot upserts)."""
         date_rows = (
@@ -700,6 +703,7 @@ class PortfolioService:
             .order_by(func.date(PriceSnapshot.timestamp))
             .all()
         )
+        usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
         written = 0
         for (raw_date,) in date_rows:
             if isinstance(raw_date, str):
@@ -710,9 +714,11 @@ class PortfolioService:
                 day = raw_date
             else:
                 continue
-            row = await self.compute_daily_snapshot(day)
+            row = await self.compute_daily_snapshot(day, usd=usd)
             if row is not None:
                 written += 1
+                if written_days is not None:
+                    written_days.add(day)
         return written
 
     async def get_daily_pnl_series(self, period: str = DEFAULT_HISTORY_PERIOD) -> dict:
