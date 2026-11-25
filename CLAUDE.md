@@ -91,9 +91,13 @@ for defaults.
   indicators 15min (`indicators_cache_ttl`).
 - **APScheduler jobs** (`app/tasks/scheduler.py`, started in `main.py` lifespan):
   - `eod_snapshot` — daily EOD price snapshot at 16:30 US/Eastern for every held
-    asset; powers historical P&L.
+    asset; powers historical P&L. Refreshes the daily FX history (`refresh_fx_history`)
+    first, then rolls up today's `portfolio_snapshots` row.
   - `backfill_historical` — one-off, runs 15s after startup, backfills ~6 months of
     daily closes from Yahoo's chart API when fewer than 5 EOD snapshots exist.
+  - `backfill_daily_pnl` — one-off, 45s after startup: refreshes `fx_daily_rates`, then
+    (once, guarded by the `fx_history_rebuild` marker) deletes and rebuilds
+    `portfolio_snapshots` at each day's FX rate; otherwise populates it only if empty.
 - **Market indicators feature (in progress)**: design doc at
   `docs/superpowers/specs/2026-07-23-market-indicators-design.md`. Planned API surface
   is `GET /api/markets/indicators?keys=...`. As of this writing the frontend
@@ -113,6 +117,11 @@ enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_mig
 
 ## Gotchas
 
+- **Daily FX history** lives in `fx_daily_rates` (units of CCY per USD, UTC bar date),
+  refreshed at startup and in the EOD job. Stored `portfolio_snapshots` rows use strict
+  historical rates and skip a day with no rate (never today's); live views fall back to
+  today's rate with a warning. Lot cost uses the purchase-date rate. The `fx_history_rebuild`
+  marker records the one-time rebuild of the stored series.
 - **Yahoo yield tickers are ×10**: `^TNX` (US 10Y) and `^TYX` (US 30Y) come back from
   Yahoo scaled by 10 — divide value and change by 10 to get the real percentage. This
   isn't yet implemented anywhere in `providers/yahoo.py`; it's a documented requirement

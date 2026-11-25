@@ -10,10 +10,17 @@ from ..database import SessionLocal
 from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
-from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_marker
-from ..models.price import PriceSnapshot
+from ..models.maintenance import (
+    ALERTS_CONVERTED_MARKER,
+    CUTOVER_MARKER,
+    FX_REBUILD_MARKER,
+    get_marker,
+    set_marker,
+)
+from ..models.price import FxDailyRate, PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
+from ..services.fx_history import refresh_fx_history
 from ..services.market_data import MarketDataService
 from ..services import breadth as breadth_service
 from ..services.notifications import NotificationService, format_alert_message
@@ -91,6 +98,8 @@ async def snapshot_eod_prices() -> None:
 
         # After per-asset EOD prices are stored, roll up today's portfolio row.
         try:
+            await _refresh_fx_history_safely(db)
+            # Built after the refresh: FxService caches daily rates per instance.
             svc = PortfolioService(db, base_currency=Currency.USD)
             await svc.compute_daily_snapshot(datetime.now(timezone.utc).date())
         except Exception as e:
@@ -101,16 +110,39 @@ async def snapshot_eod_prices() -> None:
         db.close()
 
 
+async def _refresh_fx_history_safely(db) -> None:
+    """Refresh the daily FX history; a failure must not abort the calling job."""
+    try:
+        await refresh_fx_history(db)
+    except Exception as e:
+        db.rollback()
+        logger.warning("FX history refresh failed: %s", type(e).__name__)
+
+
 async def backfill_daily_snapshots_job() -> None:
-    """One-off: populate portfolio_snapshots from price history if empty."""
+    """Keep FX history current; rebuild the stored P&L series once at the
+    historical rates, otherwise populate portfolio_snapshots if empty."""
     db = SessionLocal()
     try:
+        await _refresh_fx_history_safely(db)
+        # Built after the refresh: FxService caches daily rates per instance.
+        svc = PortfolioService(db, base_currency=Currency.USD)
+
+        has_fx = db.query(FxDailyRate.id).first() is not None
+        if has_fx and get_marker(db, FX_REBUILD_MARKER) is None:
+            db.query(PortfolioSnapshot).delete()
+            db.commit()
+            written = await svc.backfill_daily_snapshots()
+            set_marker(db, FX_REBUILD_MARKER)
+            logger.info("Daily P&L series rebuilt at historical FX: %d rows", written)
+            return
+
         if db.query(PortfolioSnapshot).first() is not None:
             return  # already populated
-        svc = PortfolioService(db, base_currency=Currency.USD)
         written = await svc.backfill_daily_snapshots()
         logger.info("Daily P&L backfill wrote %d rows", written)
     except Exception as e:
+        db.rollback()
         logger.error("Daily P&L backfill error: %s", e)
     finally:
         db.close()
