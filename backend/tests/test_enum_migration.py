@@ -93,6 +93,9 @@ def test_pg_migrate_enum_values_on_old_db():
         c.exec_driver_sql(
             f"CREATE TYPE {schema}.marketregion AS ENUM ('US','EU','ASIA')")
         c.exec_driver_sql(
+            f"CREATE TYPE {schema}.assettype AS ENUM "
+            f"('STOCK','ETF','CRYPTO','FUND','OTHER')")
+        c.exec_driver_sql(
             f"CREATE TABLE {schema}.assets (id text primary key, "
             f"currency {schema}.currency, region {schema}.marketregion)")
     scoped = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
@@ -117,10 +120,13 @@ def test_pg_migrate_enum_values_on_old_db():
                 f"SELECT unnest(enum_range(NULL::{schema}.currency))::text")]
             reg = [r[0] for r in c.exec_driver_sql(
                 f"SELECT unnest(enum_range(NULL::{schema}.marketregion))::text")]
+            types = [r[0] for r in c.exec_driver_sql(
+                f"SELECT unnest(enum_range(NULL::{schema}.assettype))::text")]
         for code in NEW_CODES:
             assert cur.count(code) == 1
         assert len(cur) == len(set(cur)) == 5 + len(NEW_CODES)
         assert reg.count("IL") == 1
+        assert types.count("INDEX") == 1
     finally:
         scoped.dispose()
         with admin.connect() as c:
@@ -143,6 +149,9 @@ def test_pg_full_init_db_concurrent_on_old_db(monkeypatch):
             f"CREATE TYPE {schema}.currency AS ENUM ('USD','EUR','GBP','JPY','CHF')")
         c.exec_driver_sql(
             f"CREATE TYPE {schema}.marketregion AS ENUM ('US','EU','ASIA')")
+        c.exec_driver_sql(
+            f"CREATE TYPE {schema}.assettype AS ENUM "
+            f"('STOCK','ETF','CRYPTO','FUND','OTHER')")
     scoped = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     monkeypatch.setattr(database, "engine", scoped)
     monkeypatch.setattr(database, "SessionLocal",

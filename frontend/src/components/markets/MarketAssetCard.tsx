@@ -1,7 +1,7 @@
 import { TrendingUp, TrendingDown, X, GripVertical, ChevronLeft, ChevronRight } from 'lucide-react';
 import { PercentChange } from '@/components/common/PriceDisplay';
 import { MarketCardData } from '@/lib/marketCardTypes';
-import { cn, formatMoney } from '@/lib/utils';
+import { cn, formatQuotePrice } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { useMarketCards } from '@/contexts/MarketCardsContext';
 
@@ -76,7 +76,7 @@ export function MarketAssetCard({ card, isFirst, isLast }: MarketAssetCardProps)
       {/* Price */}
       <div className="flex items-baseline justify-between">
         <span className="font-mono text-xl font-semibold">
-          {card.price != null ? formatMoney(card.price, card.currency || 'USD') : '—'}
+          {card.price != null ? formatQuotePrice(card.price, card.currency || 'USD', card.assetType) : '—'}
         </span>
         <PercentChange value={card.changePercent ?? 0} size="md" />
       </div>

@@ -18,7 +18,7 @@ def service():
 async def test_registry_has_expected_keys():
     expected = {
         "fear_greed_stocks", "fear_greed_crypto", "vix", "sp500", "nasdaq",
-        "dow", "russell2000", "stoxx50", "dax", "smi", "nikkei", "us10y",
+        "dow", "russell2000", "stoxx50", "dax", "smi", "nikkei", "ta35", "ta125", "us10y",
         "us30y", "s5fi", "s5th", "dxy", "gold", "oil_wti", "btc",
     }
     assert set(REGISTRY_BY_KEY.keys()) == expected

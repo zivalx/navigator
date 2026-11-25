@@ -9,6 +9,7 @@ class AssetType(str, enum.Enum):
     ETF = "etf"
     CRYPTO = "crypto"
     FUND = "fund"
+    INDEX = "index"
     OTHER = "other"
 
 

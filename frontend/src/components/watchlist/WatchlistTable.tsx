@@ -33,7 +33,7 @@ import {
 import { EmptyState } from '@/components/common/EmptyState';
 import { CreateAlertDialog, AlertAssetContext } from '@/components/alerts/CreateAlertDialog';
 import type { WatchlistItemWithAsset } from '@/lib/types';
-import { formatMoney, currencySymbol } from '@/lib/utils';
+import { formatMoney, formatQuotePrice, currencySymbol, exchangeLabel } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export function WatchlistTable() {
@@ -423,7 +423,12 @@ export function WatchlistTable() {
                     <div>
                       <span className="font-semibold">{item.asset.symbol}</span>
                       {item.asset.exchange && (
-                        <span className="ml-1.5 text-[10px] text-muted-foreground/60">{item.asset.exchange}</span>
+                        <span
+                          className="ml-1.5 text-[10px] text-muted-foreground/60"
+                          title={item.asset.exchange}
+                        >
+                          {exchangeLabel(item.asset.exchange)}
+                        </span>
                       )}
                     </div>
                   </TableCell>
@@ -434,7 +439,7 @@ export function WatchlistTable() {
                   </TableCell>
                   <TableCell className="text-right">
                     {item.currentPrice !== undefined ? (
-                      <span className="font-mono">{formatMoney(item.currentPrice, item.asset?.currency || 'USD')}</span>
+                      <span className="font-mono">{formatQuotePrice(item.currentPrice, item.asset?.currency || 'USD', item.asset?.assetType)}</span>
                     ) : (
                       <span className="text-muted-foreground text-sm">N/A</span>
                     )}
