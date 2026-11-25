@@ -174,7 +174,7 @@ class YahooFinanceProvider(BaseProvider):
         }
         response = await self.client.get(url, params=params, headers=self.HEADERS)
         response.raise_for_status()
-        result = response.json().get("chart", {}).get("result")
+        result = (response.json().get("chart") or {}).get("result")
         if not result:
             raise ValueError(f"No FX history returned for {currency}")
 
@@ -183,7 +183,7 @@ class YahooFinanceProvider(BaseProvider):
         rows = [
             (datetime.fromtimestamp(ts, timezone.utc).date(), float(close))
             for ts, close in zip(timestamps, closes)
-            if close is not None
+            if close is not None and close > 0
         ]
         if not rows:
             raise ValueError(f"No FX history returned for {currency}")
