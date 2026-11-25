@@ -1,17 +1,20 @@
 from typing import Dict
 from sqlalchemy.orm import Session
-from datetime import datetime
+import bisect
+from datetime import date, datetime, timedelta
 import httpx
 import uuid
 import logging
 
 from ..schemas.asset import Currency
-from ..models.price import FxRate
+from ..models.price import FxRate, FxDailyRate
 from ..cache import cache
 from ..config import settings
 from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+MAX_RATE_GAP_DAYS = 7
 
 
 class FxService:
@@ -20,6 +23,8 @@ class FxService:
     def __init__(self, db: Session):
         self.db = db
         self.client = httpx.AsyncClient(timeout=10.0)
+        self._daily: Dict[str, tuple] = {}
+        self._warned: set = set()
 
     async def get_rate(self, from_currency: Currency, to_currency: Currency) -> float:
         """Get FX rate with caching."""
@@ -70,6 +75,74 @@ class FxService:
             return amount
 
         rate = await self.get_rate(from_currency, to_currency)
+        return amount * rate
+
+    def _daily_series(self, code: str):
+        """Sorted (dates, rates) for one currency, loaded once per instance."""
+        series = self._daily.get(code)
+        if series is None:
+            rows = (
+                self.db.query(FxDailyRate.date, FxDailyRate.per_usd)
+                .filter(FxDailyRate.currency == Currency(code))
+                .order_by(FxDailyRate.date)
+                .all()
+            )
+            series = ([r[0] for r in rows], [r[1] for r in rows])
+            self._daily[code] = series
+        return series
+
+    def _per_usd_at(self, code: str, day: date):
+        """Units of `code` per 1 USD on `day` (latest row within the gap), or None."""
+        if code == Currency.USD.value:
+            return 1.0
+        dates, rates = self._daily_series(code)
+        i = bisect.bisect_right(dates, day) - 1
+        if i < 0 or dates[i] < day - timedelta(days=MAX_RATE_GAP_DAYS):
+            return None
+        rate = rates[i]
+        if rate is None or rate <= 0:
+            return None
+        return rate
+
+    async def get_rate_at(
+        self,
+        from_currency: Currency,
+        to_currency: Currency,
+        day: date,
+        strict: bool = False,
+    ) -> float:
+        """Rate for converting from -> to on `day`, routed through USD.
+
+        Uses the latest stored daily rate on or before `day` (max 7 days old).
+        When missing: raise ValueError if strict, else fall back to the live rate.
+        """
+        f = Currency(from_currency).value
+        t = Currency(to_currency).value
+        if f == t:
+            return 1.0
+
+        per_usd_from = self._per_usd_at(f, day)
+        per_usd_to = self._per_usd_at(t, day)
+        if per_usd_from is not None and per_usd_to is not None:
+            return per_usd_to / per_usd_from
+
+        if strict:
+            raise ValueError(f"No daily FX rate {f}->{t} on {day}")
+        if (f, t) not in self._warned:
+            self._warned.add((f, t))
+            logger.warning("FX %s->%s on %s: no daily rate, using current rate", f, t, day)
+        return await self.get_rate(Currency(f), Currency(t))
+
+    async def convert_at(
+        self,
+        amount: float,
+        from_currency: Currency,
+        to_currency: Currency,
+        day: date,
+        strict: bool = False,
+    ) -> float:
+        """Convert amount using the rate in effect on `day`."""
+        rate = await self.get_rate_at(from_currency, to_currency, day, strict=strict)
         return amount * rate
 
     async def _fetch_rate(self, from_currency: Currency, to_currency: Currency) -> float:
