@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 from .base import BaseProvider
 
@@ -158,6 +158,36 @@ class YahooFinanceProvider(BaseProvider):
             changes["change_6m"] = round((current - price_6m) / price_6m * 100, 2)
 
         return changes
+
+    async def get_fx_history(
+        self, currency: str, start: date, end: date
+    ) -> List[tuple]:
+        """Daily closes of {currency}=X (units of currency per 1 USD) for start..end inclusive."""
+        def _epoch(d: date) -> int:
+            return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+
+        url = self.QUERY_URL.format(symbol=f"{currency}=X")
+        params = {
+            "interval": "1d",
+            "period1": _epoch(start),
+            "period2": _epoch(end + timedelta(days=1)),
+        }
+        response = await self.client.get(url, params=params, headers=self.HEADERS)
+        response.raise_for_status()
+        result = response.json().get("chart", {}).get("result")
+        if not result:
+            raise ValueError(f"No FX history returned for {currency}")
+
+        timestamps = result[0].get("timestamp") or []
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close") or []
+        rows = [
+            (datetime.fromtimestamp(ts, timezone.utc).date(), float(close))
+            for ts, close in zip(timestamps, closes)
+            if close is not None
+        ]
+        if not rows:
+            raise ValueError(f"No FX history returned for {currency}")
+        return rows
 
     async def get_movers(self, direction: str = "gainers", limit: int = 10) -> List[Dict]:
         """

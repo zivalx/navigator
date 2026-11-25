@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Enum, Index
+from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Date, Enum, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from ..database import Base
@@ -36,4 +36,21 @@ class FxRate(Base):
     # Index for efficient FX lookups
     __table_args__ = (
         Index("ix_fx_currencies", "base_currency", "quote_currency"),
+    )
+
+
+class FxDailyRate(Base):
+    """Daily FX close: units of `currency` per 1 USD, keyed by UTC bar date."""
+
+    __tablename__ = "fx_daily_rates"
+
+    id = Column(String, primary_key=True)
+    currency = Column(Enum(Currency), nullable=False)
+    date = Column(Date, nullable=False)
+    per_usd = Column(Float, nullable=False)
+    source = Column(String, nullable=False, default="yahoo")
+    fetched_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("currency", "date", name="uq_fx_daily_currency_date"),
     )
