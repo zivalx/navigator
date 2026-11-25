@@ -729,10 +729,53 @@ class PortfolioService:
             .all()
         )
 
-        rate = 1.0
-        if self.base_currency != Currency.USD:
+        points = []
+        if self.base_currency == Currency.USD:
+            for r in rows:
+                points.append({
+                    "date": r.date.isoformat(),
+                    "nav": r.nav,
+                    "dailyPnL": r.daily_pnl,
+                    "dailyPnLPercent": r.daily_pnl_pct,
+                    "netFlow": r.net_flow,
+                })
+        elif rows:
+            # Latest row before the window: only seeds the first point's prev
+            # values (NAV and rate); it is never returned.
+            prev_row = (
+                self.db.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.date < start)
+                .order_by(PortfolioSnapshot.date.desc())
+                .first()
+            )
             try:
-                rate = await self.fx_service.get_rate(Currency.USD, self.base_currency)
+                prev_nav = prev_row.nav if prev_row else None
+                r_p = (
+                    await self.fx_service.get_rate_at(
+                        Currency.USD, self.base_currency, prev_row.date
+                    )
+                    if prev_row else None
+                )
+                for r in rows:
+                    r_t = await self.fx_service.get_rate_at(
+                        Currency.USD, self.base_currency, r.date
+                    )
+                    if prev_nav is None:
+                        # First-ever row: no prior NAV, so no currency move.
+                        pnl = r.daily_pnl * r_t
+                        pct = r.daily_pnl_pct
+                    else:
+                        pnl = r.daily_pnl * r_t + prev_nav * (r_t - r_p)
+                        base_prev = prev_nav * r_p
+                        pct = pnl / base_prev * 100 if base_prev else 0.0
+                    points.append({
+                        "date": r.date.isoformat(),
+                        "nav": r.nav * r_t,
+                        "dailyPnL": pnl,
+                        "dailyPnLPercent": pct,
+                        "netFlow": r.net_flow * r_t,
+                    })
+                    prev_nav, r_p = r.nav, r_t
             except Exception:
                 # Never show the USD series labelled as another currency.
                 logger.warning(
@@ -744,21 +787,6 @@ class PortfolioService:
                     "period": period,
                     "points": [],
                 }
-
-        def to_display(usd_amount: float) -> float:
-            if self.base_currency == Currency.USD:
-                return usd_amount
-            return usd_amount * rate
-
-        points = []
-        for r in rows:
-            points.append({
-                "date": r.date.isoformat(),
-                "nav": to_display(r.nav),
-                "dailyPnL": to_display(r.daily_pnl),
-                "dailyPnLPercent": r.daily_pnl_pct,
-                "netFlow": to_display(r.net_flow),
-            })
 
         return {
             "base_currency": self.base_currency.value,

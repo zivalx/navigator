@@ -113,3 +113,79 @@ async def test_daily_snapshot_uses_historical_rates(db_session, rates, quotes):
     assert row1.nav == pytest.approx(qty * p1 / r1)
     assert row2.nav == pytest.approx(qty * p2 / r2)
     assert row2.daily_pnl == pytest.approx(qty * (p2 / r2 - p1 / r1))
+
+
+def add_series_row(db, day, nav, net_flow, pnl, pct):
+    db.add(PortfolioSnapshot(
+        id=str(uuid.uuid4()), date=day, nav=nav, net_flow=net_flow,
+        daily_pnl=pnl, daily_pnl_pct=pct, base_currency="USD",
+    ))
+    db.commit()
+
+
+@pytest.mark.asyncio
+async def test_series_ils_includes_currency_move(db_session):
+    d2 = (NOW - dt.timedelta(days=2)).date()
+    d1 = d2 - dt.timedelta(days=1)
+    seed_ils(db_session, d1, 3.5)
+    seed_ils(db_session, d2, 3.6)
+    add_series_row(db_session, d1, 1000.0, 0.0, 0.0, 0.0)
+    add_series_row(db_session, d2, 1010.0, 0.0, 10.0, 1.0)
+
+    result = await PortfolioService(db_session, base_currency=Currency.ILS).get_daily_pnl_series("1m")
+
+    p1, p2 = result["points"]
+    assert p1["nav"] == pytest.approx(3500.0)
+    assert p1["dailyPnL"] == pytest.approx(0.0)
+    assert p2["nav"] == pytest.approx(3636.0)
+    assert p2["dailyPnL"] == pytest.approx(10 * 3.6 + 1000 * 0.1)
+    assert p2["dailyPnL"] == pytest.approx(136.0)
+    assert p2["dailyPnLPercent"] == pytest.approx(136 / 3500 * 100)
+
+
+@pytest.mark.asyncio
+async def test_series_uses_row_before_window_as_prev(db_session):
+    today = NOW.date()
+    out = today - dt.timedelta(days=40)   # outside the 1m window
+    first = today - dt.timedelta(days=5)  # inside
+    seed_ils(db_session, out, 3.5)
+    seed_ils(db_session, first, 3.6)
+    add_series_row(db_session, out, 1000.0, 0.0, 5.0, 0.5)
+    add_series_row(db_session, first, 1010.0, 2.0, 10.0, 1.0)
+
+    result = await PortfolioService(db_session, base_currency=Currency.ILS).get_daily_pnl_series("1m")
+
+    assert [p["date"] for p in result["points"]] == [first.isoformat()]
+    p = result["points"][0]
+    assert p["dailyPnL"] == pytest.approx(10 * 3.6 + 1000 * 0.1)
+    assert p["dailyPnLPercent"] == pytest.approx(136 / 3500 * 100)
+    assert p["netFlow"] == pytest.approx(2.0 * 3.6)
+
+
+@pytest.mark.asyncio
+async def test_series_first_ever_row_has_no_fx_term(db_session):
+    d1 = (NOW - dt.timedelta(days=3)).date()
+    seed_ils(db_session, d1, 3.5)
+    add_series_row(db_session, d1, 1000.0, 0.0, 10.0, 1.25)
+
+    result = await PortfolioService(db_session, base_currency=Currency.ILS).get_daily_pnl_series("1m")
+
+    p = result["points"][0]
+    assert p["dailyPnL"] == pytest.approx(35.0)
+    assert p["dailyPnLPercent"] == pytest.approx(1.25)
+
+
+@pytest.mark.asyncio
+async def test_series_usd_unchanged(db_session):
+    d1 = (NOW - dt.timedelta(days=3)).date()
+    d2 = d1 + dt.timedelta(days=1)
+    add_series_row(db_session, d1, 1000.0, 5.0, 0.0, 0.0)
+    add_series_row(db_session, d2, 1010.0, 0.0, 10.0, 1.0)
+
+    result = await PortfolioService(db_session, base_currency=Currency.USD).get_daily_pnl_series("1m")
+
+    assert result["points"][1] == {
+        "date": d2.isoformat(), "nav": 1010.0, "dailyPnL": 10.0,
+        "dailyPnLPercent": 1.0, "netFlow": 0.0,
+    }
+    assert result["points"][0]["netFlow"] == 5.0
