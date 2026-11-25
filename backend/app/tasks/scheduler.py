@@ -176,6 +176,10 @@ async def backfill_daily_snapshots_job() -> None:
                 if row.date not in written_days:
                     db.delete(row)
             db.commit()
+            # The first pass may have taken a day's previous NAV from a stale
+            # row that was just pruned; recompute now that only rebuilt rows
+            # remain (idempotent, same days written).
+            await svc.backfill_daily_snapshots()
             set_marker(db, FX_REBUILD_MARKER)
             logger.info("Daily P&L series rebuilt at historical FX: %d rows", written)
             return

@@ -261,3 +261,46 @@ async def test_job_error_log_omits_exception_text(eval_db, monkeypatch, caplog):
 
     assert "123456.78" not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pct_does_not_use_stale_prev_row(eval_db, monkeypatch):
+    """A rebuilt day must take its previous NAV from a rebuilt row, never from
+    a stale row that the rebuild later prunes."""
+    e_day = dt.date(2026, 6, 25)  # fresh day before the stale D0
+    asset = Asset(
+        id=str(uuid.uuid4()), symbol="ILB", name="Ilb Ltd.", exchange="TASE",
+        currency=Currency.ILS, asset_type=AssetType.STOCK,
+        market_region=MarketRegion.IL,
+    )
+    eval_db.add(asset)
+    eval_db.add(HoldingLot(
+        id=str(uuid.uuid4()), asset_id=asset.id, quantity=10, avg_cost=300.0,
+        cost_currency=Currency.ILS, account_name="m",
+        purchase_date=dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc),
+    ))
+    for day, price in ((e_day, 300.0), (D1, 350.0)):
+        eval_db.add(PriceSnapshot(
+            id=str(uuid.uuid4()), asset_id=asset.id, price=price,
+            currency=Currency.ILS,
+            timestamp=dt.datetime.combine(day, dt.time(23, 0), tzinfo=dt.timezone.utc),
+            source="eod_snapshot",
+        ))
+    # Stale old-rate row on D0, between the two price days; it no longer computes.
+    eval_db.add(PortfolioSnapshot(
+        id=str(uuid.uuid4()), date=D0, nav=999999.0, net_flow=0.0,
+        daily_pnl=0.0, daily_pnl_pct=0.0, base_currency="USD",
+    ))
+    eval_db.commit()
+    today = dt.datetime.now(dt.timezone.utc).date()
+    _seed_fx(eval_db, Currency.ILS, [e_day, D1, today])
+    _noop_refresh(monkeypatch)
+
+    await scheduler.backfill_daily_snapshots_job()
+
+    rows = {r.date: r for r in eval_db.query(PortfolioSnapshot).all()}
+    assert D0 not in rows
+    prev_nav = 10 * 300.0 / 3.5
+    pnl = 10 * (350.0 - 300.0) / 3.5
+    assert rows[D1].daily_pnl == pytest.approx(pnl)
+    assert rows[D1].daily_pnl_pct == pytest.approx(pnl / prev_nav * 100)
