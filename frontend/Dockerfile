@@ -1,5 +1,5 @@
 # Stage 1: Build the frontend
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Optional local-only build secret `corp_ca` (corporate root CA for a TLS-inspecting proxy): used
