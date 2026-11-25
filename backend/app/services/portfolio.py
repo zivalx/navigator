@@ -60,9 +60,15 @@ def _is_lot_currency_check(lot, price_currency=None) -> bool:
 class PortfolioService:
     """Service for portfolio calculations and analytics."""
 
-    def __init__(self, db: Session, base_currency: Currency = Currency.USD):
+    def __init__(
+        self, db: Session, base_currency: Currency = Currency.USD,
+        strict_fx: bool = False,
+    ):
         self.db = db
         self.base_currency = base_currency
+        # strict_fx: historical lookups raise when the day has no stored rate
+        # instead of falling back to today's rate (used for stored rows).
+        self.strict_fx = strict_fx
         self.market_service = MarketDataService(db)
         self.fx_service = FxService(db)
 
@@ -120,11 +126,17 @@ class PortfolioService:
         # Cost basis in base currency, exposed as avgCostBase so callers can
         # aggregate cost without mixing native cost currencies into a total.
         try:
-            avg_cost_base = await self.fx_service.convert(
-                holding.avg_cost,
-                Currency(_currency_code(holding.cost_currency)),
-                self.base_currency,
-            )
+            cost_ccy = Currency(_currency_code(holding.cost_currency))
+            if holding.purchase_date is not None:
+                # Cost basis is fixed at the rate of the purchase day.
+                avg_cost_base = await self.fx_service.convert_at(
+                    holding.avg_cost, cost_ccy, self.base_currency,
+                    _ensure_aware(holding.purchase_date).date(),
+                )
+            else:
+                avg_cost_base = await self.fx_service.convert(
+                    holding.avg_cost, cost_ccy, self.base_currency,
+                )
         except Exception:
             return unavailable("fx_unavailable")
 
@@ -324,10 +336,12 @@ class PortfolioService:
             has_any_price = True
 
             try:
-                price_base = await self.fx_service.convert(
+                price_base = await self.fx_service.convert_at(
                     snapshot.price,
                     Currency(_currency_code(snapshot.currency)),
                     self.base_currency,
+                    target_date.date(),
+                    strict=self.strict_fx,
                 )
             except Exception:
                 # A NAV missing a holding is a fake dip; omit the point.
@@ -523,8 +537,9 @@ class PortfolioService:
         if snap is None:
             return None
         try:
-            return await self.fx_service.convert(
-                snap.price, Currency(_currency_code(snap.currency)), Currency.USD
+            return await self.fx_service.convert_at(
+                snap.price, Currency(_currency_code(snap.currency)), Currency.USD,
+                _ensure_aware(when).date(), strict=self.strict_fx,
             )
         except Exception:
             return None
@@ -545,7 +560,7 @@ class PortfolioService:
 
         # The stored series is canonically USD regardless of the service's
         # configured base_currency.
-        usd = PortfolioService(self.db, base_currency=Currency.USD)
+        usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
 
         # A stored row is permanent: if any held lot's cost or price has no
         # USD rate, skip the day rather than write a NAV missing a holding.
@@ -587,8 +602,9 @@ class PortfolioService:
         for lot in bought_today:
             cost_code = _currency_code(lot.cost_currency)
             try:
-                cost_usd = await usd.fx_service.convert(
-                    lot.avg_cost, Currency(cost_code), Currency.USD
+                cost_usd = await usd.fx_service.convert_at(
+                    lot.avg_cost, Currency(cost_code), Currency.USD, day,
+                    strict=True,
                 )
             except Exception:
                 logger.warning(
@@ -667,7 +683,10 @@ class PortfolioService:
         missing = set()
         for code in codes:
             try:
-                await self.fx_service.convert(1.0, Currency(code), Currency.USD)
+                await self.fx_service.get_rate_at(
+                    Currency(code), Currency.USD, end_of_day.date(),
+                    strict=self.strict_fx,
+                )
             except Exception:
                 missing.add(code)
         return missing
