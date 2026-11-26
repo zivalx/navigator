@@ -76,7 +76,7 @@ fallback providers / features, none are required to run:
 - `POLYGON_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY` — stock/ETF quote and
   movers fallbacks behind Yahoo
 - `MARKETAUX_API_KEY` — news with sentiment (news router degrades without it)
-- `EXCHANGERATE_API_KEY` — live FX rates
+- `EXCHANGERATE_API_KEY` — live FX fallback behind Yahoo `{CCY}=X` (keyless v4 tier used without it)
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — reserved for future AI features, not yet wired into any router/service
 - `DATABASE_URL`, `REDIS_URL` — default to the docker-compose service names/ports
 - `SCHEDULER_ENABLED` — default `true`; `false` skips the scheduler leader loop entirely
@@ -177,7 +177,8 @@ No frontend test setup was found.
 - **Daily FX history** lives in `fx_daily_rates` (units of CCY per USD, bar date in the exchange timezone, Europe/London),
   refreshed at startup and in the EOD job. Stored `portfolio_snapshots` rows use strict
   historical rates and skip a day with no rate (never today's); live views fall back to
-  today's rate with a warning. Lot cost uses the purchase-date rate. The `fx_history_rebuild`
+  today's rate with a warning. The live rate (`FxService.get_rate`) comes from the same Yahoo
+  `{CCY}=X` quote (`regularMarketPrice`), then ExchangeRate-API, then the latest `fx_rates` row. Lot cost uses the purchase-date rate. The `fx_history_rebuild`
   marker records the one-time rebuild of the stored series.
 - **Yahoo yield tickers are ×10**: `^TNX` (US 10Y) and `^TYX` (US 30Y) come back from
   Yahoo scaled by 10. This is implemented in `services/indicators.py` (`"scale": 0.1`),

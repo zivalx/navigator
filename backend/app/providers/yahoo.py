@@ -188,6 +188,25 @@ class YahooFinanceProvider(BaseProvider):
 
         return changes
 
+    async def get_fx_quote(self, currency: str) -> float:
+        """Live {currency}=X regularMarketPrice (units of currency per 1 USD).
+
+        Same symbol and units as get_fx_history. Raises on network failure or a
+        missing/non-positive price.
+        """
+        url = self.QUERY_URL.format(symbol=f"{currency}=X")
+        response = await self.client.get(
+            url, params={"interval": "1d", "range": "1d"}, headers=self.HEADERS
+        )
+        response.raise_for_status()
+        result = (response.json().get("chart") or {}).get("result")
+        if not result:
+            raise ValueError(f"No FX quote returned for {currency}")
+        price = (result[0].get("meta") or {}).get("regularMarketPrice")
+        if not isinstance(price, (int, float)) or price <= 0:
+            raise ValueError(f"No FX quote returned for {currency}")
+        return float(price)
+
     async def get_fx_history(
         self, currency: str, start: date, end: date
     ) -> List[tuple]:

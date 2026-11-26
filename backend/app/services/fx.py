@@ -10,6 +10,7 @@ from ..schemas.asset import Currency
 from ..models.price import FxRate, FxDailyRate
 from ..cache import cache
 from ..config import settings
+from ..providers.yahoo import YahooFinanceProvider
 from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class FxService:
         self.client = httpx.AsyncClient(timeout=10.0)
         self._daily: Dict[str, tuple] = {}
         self._warned: set = set()
+        self._yahoo: YahooFinanceProvider | None = None
 
     async def get_rate(self, from_currency: Currency, to_currency: Currency) -> float:
         """Get FX rate with caching."""
@@ -146,7 +148,31 @@ class FxService:
         return amount * rate
 
     async def _fetch_rate(self, from_currency: Currency, to_currency: Currency) -> float:
-        """Fetch rate from external API (ExchangeRate-API or similar)."""
+        """Live rate: Yahoo {CCY}=X first (same source as fx_daily_rates), then ExchangeRate-API."""
+        try:
+            return await self._fetch_yahoo_rate(from_currency, to_currency)
+        except Exception as e:
+            logger.warning(
+                "FALLBACK [FX %s→%s]: Yahoo failed (%s), trying ExchangeRate-API",
+                from_currency.value, to_currency.value, redact_secrets(e),
+            )
+        return await self._fetch_exchangerate_api_rate(from_currency, to_currency)
+
+    async def _yahoo_per_usd(self, code: str) -> float:
+        if code == Currency.USD.value:
+            return 1.0
+        if self._yahoo is None:
+            self._yahoo = YahooFinanceProvider()
+        return await self._yahoo.get_fx_quote(code)
+
+    async def _fetch_yahoo_rate(self, from_currency: Currency, to_currency: Currency) -> float:
+        """Rate from -> to from Yahoo live quotes (CCY per USD), crossed through USD like get_rate_at."""
+        per_usd_from = await self._yahoo_per_usd(from_currency.value)
+        per_usd_to = await self._yahoo_per_usd(to_currency.value)
+        return per_usd_to / per_usd_from
+
+    async def _fetch_exchangerate_api_rate(self, from_currency: Currency, to_currency: Currency) -> float:
+        """Fetch rate from ExchangeRate-API (keyed v6, else keyless v4)."""
         # Using ExchangeRate-API (free tier: 1500 requests/month)
         if settings.exchangerate_api_key:
             url = f"https://v6.exchangerate-api.com/v6/{settings.exchangerate_api_key}/pair/{from_currency.value}/{to_currency.value}"
@@ -188,5 +214,7 @@ class FxService:
             self.db.rollback()
 
     async def close(self):
-        """Close HTTP client."""
+        """Close HTTP clients."""
         await self.client.aclose()
+        if self._yahoo is not None:
+            await self._yahoo.close()
