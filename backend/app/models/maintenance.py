@@ -7,6 +7,7 @@ from ..database import Base
 
 CUTOVER_MARKER = "minor_units_cutover"
 ALERTS_CONVERTED_MARKER = "minor_unit_alerts_converted"
+FX_REBUILD_MARKER = "fx_history_rebuild"
 
 
 class MaintenanceRun(Base):

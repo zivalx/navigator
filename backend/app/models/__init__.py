@@ -1,7 +1,7 @@
 from .asset import Asset
 from .holding import HoldingLot, CashBalance
 from .watchlist import Watchlist, WatchlistItem
-from .price import PriceSnapshot, FxRate
+from .price import PriceSnapshot, FxRate, FxDailyRate
 from .news import NewsItem
 from .alert import PriceAlert, AlertRule
 from .portfolio_snapshot import PortfolioSnapshot
@@ -16,6 +16,7 @@ __all__ = [
     "WatchlistItem",
     "PriceSnapshot",
     "FxRate",
+    "FxDailyRate",
     "NewsItem",
     "PriceAlert",
     "AlertRule",

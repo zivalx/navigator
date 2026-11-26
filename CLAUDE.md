@@ -118,10 +118,10 @@ for defaults.
   | `scheduler_leader` | every 30 s (leader loop, not a job) | leader heartbeat |
   | `quote_refresh` | every 15 min (`QUOTE_REFRESH_INTERVAL_MINUTES`) | quotes for held/alerted assets whose exchange is in session; writes the price snapshots that prove freshness |
   | `price_alert_evaluation` | every 15 min (`ALERT_EVALUATION_INTERVAL_MINUTES`) | evaluates active alerts; sends Telegram notifications |
-  | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset; today's portfolio row only when every held, priceable, in-session asset has today's row |
+  | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset; today's portfolio row only when every held, priceable, in-session asset has today's row (refreshes `fx_daily_rates` first) |
   | `breadth_snapshot` | 17:00 America/New_York, daily | S5FI/S5TH into Redis (no expiry) |
-  | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting (window: last row - 5 d, at least 30 d back, 183 d for new holdings; a 404 or `chart.error` is "no data", not a failure); then portfolio rows (skipped while `portfolio_snapshots` is empty), and earlier missing portfolio days insert-only |
-  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed; writes only exchanges that are already closed), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty), `breadth_warm_start` in order |
+  | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting (window: last row - 5 d, at least 30 d back, 183 d for new holdings; a 404 or `chart.error` is "no data", not a failure); then refreshes `fx_daily_rates` and writes portfolio rows (skipped while `portfolio_snapshots` is empty), and earlier missing portfolio days insert-only |
+  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed; writes only exchanges that are already closed), `eod_catchup`, `backfill_daily_snapshots_job` (refreshes `fx_daily_rates`; once, guarded by the `fx_history_rebuild` marker and only when every held currency has rate coverage, rebuilds `portfolio_snapshots` at each day's FX rate; otherwise fills it only if empty), `breadth_warm_start` in order |
 
   `backfill_historical` no longer exists: `eod_catchup` and `leader_startup` replace it.
 - **EOD rules** (`services/eod.py`, `services/sessions.py`): EOD eligibility is separate
@@ -174,6 +174,11 @@ No frontend test setup was found.
 
 ## Gotchas
 
+- **Daily FX history** lives in `fx_daily_rates` (units of CCY per USD, bar date in the exchange timezone, Europe/London),
+  refreshed at startup and in the EOD job. Stored `portfolio_snapshots` rows use strict
+  historical rates and skip a day with no rate (never today's); live views fall back to
+  today's rate with a warning. Lot cost uses the purchase-date rate. The `fx_history_rebuild`
+  marker records the one-time rebuild of the stored series.
 - **Yahoo yield tickers are ×10**: `^TNX` (US 10Y) and `^TYX` (US 30Y) come back from
   Yahoo scaled by 10. This is implemented in `services/indicators.py` (`"scale": 0.1`),
   not in `providers/yahoo.py`.

@@ -15,6 +15,7 @@ import uuid
 
 import pytest
 
+from app.models import FxDailyRate
 from app.models.asset import Currency, MarketRegion
 from app.models.holding import HoldingLot
 from app.models.portfolio_snapshot import PortfolioSnapshot
@@ -465,6 +466,11 @@ async def test_daily_snapshot_skipped_on_lot_currency_check_purchase_day(
     buy_day = (NOW - dt.timedelta(days=3)).date()
     next_day = buy_day + dt.timedelta(days=1)
     rates[("ILS", "USD")] = 0.27
+    db_session.add(FxDailyRate(
+        id=str(uuid.uuid4()), currency=Currency.ILS, date=buy_day,
+        per_usd=1 / 0.27, source="yahoo", fetched_at=NOW,
+    ))
+    db_session.commit()
 
     bad = make_ils_asset(db_session, symbol="LUMI.TA")
     make_lot(db_session, bad, 10, 6000.0, Currency.USD,
@@ -572,6 +578,11 @@ async def test_daily_snapshot_skipped_on_purchase_day_of_usd_labelled_ils_listin
     never reaches net_flow."""
     buy_day = (NOW - dt.timedelta(days=3)).date()
     rates[("ILS", "USD")] = 0.27
+    db_session.add(FxDailyRate(
+        id=str(uuid.uuid4()), currency=Currency.ILS, date=buy_day,
+        per_usd=1 / 0.27, source="yahoo", fetched_at=NOW,
+    ))
+    db_session.commit()
 
     stale = make_asset(db_session, symbol="TEVA.TA")  # USD label (pre-audit)
     make_lot(db_session, stale, 10, 60.0, Currency.USD,

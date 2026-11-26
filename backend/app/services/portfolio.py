@@ -60,9 +60,15 @@ def _is_lot_currency_check(lot, price_currency=None) -> bool:
 class PortfolioService:
     """Service for portfolio calculations and analytics."""
 
-    def __init__(self, db: Session, base_currency: Currency = Currency.USD):
+    def __init__(
+        self, db: Session, base_currency: Currency = Currency.USD,
+        strict_fx: bool = False,
+    ):
         self.db = db
         self.base_currency = base_currency
+        # strict_fx: historical lookups raise when the day has no stored rate
+        # instead of falling back to today's rate (used for stored rows).
+        self.strict_fx = strict_fx
         self.market_service = MarketDataService(db)
         self.fx_service = FxService(db)
 
@@ -120,11 +126,17 @@ class PortfolioService:
         # Cost basis in base currency, exposed as avgCostBase so callers can
         # aggregate cost without mixing native cost currencies into a total.
         try:
-            avg_cost_base = await self.fx_service.convert(
-                holding.avg_cost,
-                Currency(_currency_code(holding.cost_currency)),
-                self.base_currency,
-            )
+            cost_ccy = Currency(_currency_code(holding.cost_currency))
+            if holding.purchase_date is not None:
+                # Cost basis is fixed at the rate of the purchase day.
+                avg_cost_base = await self.fx_service.convert_at(
+                    holding.avg_cost, cost_ccy, self.base_currency,
+                    _ensure_aware(holding.purchase_date).date(),
+                )
+            else:
+                avg_cost_base = await self.fx_service.convert(
+                    holding.avg_cost, cost_ccy, self.base_currency,
+                )
         except Exception:
             return unavailable("fx_unavailable")
 
@@ -324,10 +336,12 @@ class PortfolioService:
             has_any_price = True
 
             try:
-                price_base = await self.fx_service.convert(
+                price_base = await self.fx_service.convert_at(
                     snapshot.price,
                     Currency(_currency_code(snapshot.currency)),
                     self.base_currency,
+                    target_date.date(),
+                    strict=self.strict_fx,
                 )
             except Exception:
                 # A NAV missing a holding is a fake dip; omit the point.
@@ -523,14 +537,18 @@ class PortfolioService:
         if snap is None:
             return None
         try:
-            return await self.fx_service.convert(
-                snap.price, Currency(_currency_code(snap.currency)), Currency.USD
+            return await self.fx_service.convert_at(
+                snap.price, Currency(_currency_code(snap.currency)), Currency.USD,
+                _ensure_aware(when).date(), strict=self.strict_fx,
             )
         except Exception:
             return None
 
     async def compute_daily_snapshot(
-        self, day: date_cls, insert_only: bool = False
+        self,
+        day: date_cls,
+        usd: Optional["PortfolioService"] = None,
+        insert_only: bool = False,
     ) -> Optional[PortfolioSnapshot]:
         """Compute and upsert the portfolio_snapshots row for `day`.
 
@@ -550,7 +568,8 @@ class PortfolioService:
 
         # The stored series is canonically USD regardless of the service's
         # configured base_currency.
-        usd = PortfolioService(self.db, base_currency=Currency.USD)
+        if usd is None:
+            usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
 
         # A stored row is permanent: if any held lot's cost or price has no
         # USD rate, skip the day rather than write a NAV missing a holding.
@@ -592,8 +611,9 @@ class PortfolioService:
         for lot in bought_today:
             cost_code = _currency_code(lot.cost_currency)
             try:
-                cost_usd = await usd.fx_service.convert(
-                    lot.avg_cost, Currency(cost_code), Currency.USD
+                cost_usd = await usd.fx_service.convert_at(
+                    lot.avg_cost, Currency(cost_code), Currency.USD, day,
+                    strict=True,
                 )
             except Exception:
                 logger.warning(
@@ -672,13 +692,19 @@ class PortfolioService:
         missing = set()
         for code in codes:
             try:
-                await self.fx_service.convert(1.0, Currency(code), Currency.USD)
+                await self.fx_service.get_rate_at(
+                    Currency(code), Currency.USD, end_of_day.date(),
+                    strict=self.strict_fx,
+                )
             except Exception:
                 missing.add(code)
         return missing
 
     async def backfill_daily_snapshots(
-        self, before: date_cls | None = None, since: date_cls | None = None
+        self,
+        before: date_cls | None = None,
+        since: date_cls | None = None,
+        written_days: Optional[set] = None,
     ) -> int:
         """Build the daily series from every distinct date that has price
         snapshots, oldest first. Idempotent (compute_daily_snapshot upserts).
@@ -690,6 +716,7 @@ class PortfolioService:
             .order_by(func.date(PriceSnapshot.timestamp))
             .all()
         )
+        usd = PortfolioService(self.db, base_currency=Currency.USD, strict_fx=True)
         written = 0
         for (raw_date,) in date_rows:
             if isinstance(raw_date, str):
@@ -704,9 +731,13 @@ class PortfolioService:
                 continue
             if since is not None and day < since:
                 continue
-            row = await self.compute_daily_snapshot(day, insert_only=before is not None or since is not None)
+            row = await self.compute_daily_snapshot(
+                day, usd=usd, insert_only=before is not None or since is not None
+            )
             if row is not None:
                 written += 1
+                if written_days is not None:
+                    written_days.add(day)
         return written
 
     async def get_daily_pnl_series(self, period: str = DEFAULT_HISTORY_PERIOD) -> dict:
@@ -723,10 +754,53 @@ class PortfolioService:
             .all()
         )
 
-        rate = 1.0
-        if self.base_currency != Currency.USD:
+        points = []
+        if self.base_currency == Currency.USD:
+            for r in rows:
+                points.append({
+                    "date": r.date.isoformat(),
+                    "nav": r.nav,
+                    "dailyPnL": r.daily_pnl,
+                    "dailyPnLPercent": r.daily_pnl_pct,
+                    "netFlow": r.net_flow,
+                })
+        elif rows:
+            # Latest row before the window: only seeds the first point's prev
+            # values (NAV and rate); it is never returned.
+            prev_row = (
+                self.db.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.date < start)
+                .order_by(PortfolioSnapshot.date.desc())
+                .first()
+            )
             try:
-                rate = await self.fx_service.get_rate(Currency.USD, self.base_currency)
+                prev_nav = prev_row.nav if prev_row else None
+                r_p = (
+                    await self.fx_service.get_rate_at(
+                        Currency.USD, self.base_currency, prev_row.date
+                    )
+                    if prev_row else None
+                )
+                for r in rows:
+                    r_t = await self.fx_service.get_rate_at(
+                        Currency.USD, self.base_currency, r.date
+                    )
+                    if prev_nav is None:
+                        # First-ever row: no prior NAV, so no currency move.
+                        pnl = r.daily_pnl * r_t
+                        pct = r.daily_pnl_pct
+                    else:
+                        pnl = r.daily_pnl * r_t + prev_nav * (r_t - r_p)
+                        base_prev = prev_nav * r_p
+                        pct = pnl / base_prev * 100 if base_prev else 0.0
+                    points.append({
+                        "date": r.date.isoformat(),
+                        "nav": r.nav * r_t,
+                        "dailyPnL": pnl,
+                        "dailyPnLPercent": pct,
+                        "netFlow": r.net_flow * r_t,
+                    })
+                    prev_nav, r_p = r.nav, r_t
             except Exception:
                 # Never show the USD series labelled as another currency.
                 logger.warning(
@@ -738,21 +812,6 @@ class PortfolioService:
                     "period": period,
                     "points": [],
                 }
-
-        def to_display(usd_amount: float) -> float:
-            if self.base_currency == Currency.USD:
-                return usd_amount
-            return usd_amount * rate
-
-        points = []
-        for r in rows:
-            points.append({
-                "date": r.date.isoformat(),
-                "nav": to_display(r.nav),
-                "dailyPnL": to_display(r.daily_pnl),
-                "dailyPnLPercent": r.daily_pnl_pct,
-                "netFlow": to_display(r.net_flow),
-            })
 
         return {
             "base_currency": self.base_currency.value,

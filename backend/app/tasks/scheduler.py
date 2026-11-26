@@ -14,11 +14,18 @@ from ..models.asset import Asset, Currency
 from ..models.alert import AlertRule, PriceAlert
 from ..models.holding import HoldingLot
 from ..models.job_heartbeat import JobHeartbeat
-from ..models.maintenance import ALERTS_CONVERTED_MARKER, CUTOVER_MARKER, get_marker
-from ..models.price import PriceSnapshot
+from ..models.maintenance import (
+    ALERTS_CONVERTED_MARKER,
+    CUTOVER_MARKER,
+    FX_REBUILD_MARKER,
+    get_marker,
+    set_marker,
+)
+from ..models.price import FxDailyRate, PriceSnapshot
 from ..models.portfolio_snapshot import PortfolioSnapshot
 from ..services.currency_units import normalize_quote_currency
 from ..services.eod import eod_quote_time, upsert_eod
+from ..services.fx_history import refresh_fx_history
 from ..services.sessions import (
     ALERTABLE_SOURCES,
     NEUTRAL_REASONS,
@@ -156,6 +163,8 @@ async def snapshot_eod_prices(only_closed: bool = False) -> None:
                     today, unpriced,
                 )
             else:
+                await _refresh_fx_history_safely(db)
+                # Built after the refresh: FxService caches daily rates per instance.
                 svc = PortfolioService(db, base_currency=Currency.USD)
                 try:
                     await svc.compute_daily_snapshot(today)
@@ -181,17 +190,87 @@ async def snapshot_eod_prices(only_closed: bool = False) -> None:
         db.close()
 
 
+async def _refresh_fx_history_safely(db) -> None:
+    """Refresh the daily FX history; a failure must not abort the calling job."""
+    try:
+        await refresh_fx_history(db)
+    except Exception as e:
+        db.rollback()
+        logger.warning("FX history refresh failed: %s", type(e).__name__)
+
+
+def _fx_coverage_gaps(db, today) -> set:
+    """Non-USD currency codes whose fx_daily_rates do not span the stored price
+    history: a row on/before (earliest snapshot + 7 days) and on/after (today - 7)."""
+    codes = set()
+    for col in (HoldingLot.cost_currency, PriceSnapshot.currency):
+        for (ccy,) in db.query(col).distinct():
+            code = getattr(ccy, "value", ccy)
+            if code and code != Currency.USD.value:
+                codes.add(code)
+    if not codes:
+        return set()
+    earliest_ts = db.query(func.min(PriceSnapshot.timestamp)).scalar()
+    early_limit = (
+        earliest_ts.date() + timedelta(days=7) if earliest_ts is not None else None
+    )
+    late_limit = today - timedelta(days=7)
+    gaps = set()
+    for code in codes:
+        q = db.query(FxDailyRate.id).filter(FxDailyRate.currency == Currency(code))
+        has_late = q.filter(FxDailyRate.date >= late_limit).first() is not None
+        has_early = early_limit is None or (
+            q.filter(FxDailyRate.date <= early_limit).first() is not None
+        )
+        if not (has_late and has_early):
+            gaps.add(code)
+    return gaps
+
+
 async def backfill_daily_snapshots_job() -> None:
-    """One-off: populate portfolio_snapshots from price history if empty."""
+    """Keep FX history current; rebuild the stored P&L series once at the
+    historical rates, otherwise populate portfolio_snapshots if empty."""
     db = SessionLocal()
     try:
+        await _refresh_fx_history_safely(db)
+        # Built after the refresh: FxService caches daily rates per instance.
+        svc = PortfolioService(db, base_currency=Currency.USD)
+
+        has_fx = db.query(FxDailyRate.id).first() is not None
+        if has_fx and get_marker(db, FX_REBUILD_MARKER) is None:
+            gaps = _fx_coverage_gaps(db, datetime.now(timezone.utc).date())
+            if gaps:
+                logger.warning(
+                    "Skipping P&L rebuild: FX history does not cover %s",
+                    ", ".join(sorted(gaps)),
+                )
+                return
+            had_prices = db.query(PriceSnapshot.id).first() is not None
+            written_days: set = set()
+            written = await svc.backfill_daily_snapshots(written_days=written_days)
+            if had_prices and written == 0:
+                logger.warning("Skipping P&L rebuild marker: no snapshot rows were written")
+                return
+            # Upsert first, then drop only rows this rebuild did not rewrite.
+            for row in db.query(PortfolioSnapshot).all():
+                if row.date not in written_days:
+                    db.delete(row)
+            db.commit()
+            # The first pass may have taken a day's previous NAV from a stale
+            # row that was just pruned; recompute now that only rebuilt rows
+            # remain (idempotent, same days written).
+            await svc.backfill_daily_snapshots()
+            set_marker(db, FX_REBUILD_MARKER)
+            logger.info("Daily P&L series rebuilt at historical FX: %d rows", written)
+            return
+
         if db.query(PortfolioSnapshot).first() is not None:
             return  # already populated
-        svc = PortfolioService(db, base_currency=Currency.USD)
         written = await svc.backfill_daily_snapshots()
         logger.info("Daily P&L backfill wrote %d rows", written)
     except Exception as e:
-        logger.error("Daily P&L backfill error: %s", redact_secrets(e))
+        db.rollback()
+        logger.error("Daily P&L backfill error: %s", type(e).__name__)
     finally:
         db.close()
 
@@ -524,6 +603,8 @@ async def eod_catchup() -> None:
                 else:
                     inserted += offered
 
+        # Portfolio rows use each day's stored FX rate; refresh it first.
+        await _refresh_fx_history_safely(db)
         portfolio_failed = 0
         try:
             portfolio_failed = await _portfolio_catchup(
