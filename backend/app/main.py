@@ -4,7 +4,10 @@ from contextlib import asynccontextmanager
 from .config import settings
 from .cache import cache
 from .database import init_db
-from .tasks.scheduler import start_scheduler, shutdown_scheduler
+from .tasks import leader as scheduler_leader
+from .logging_config import configure_logging
+
+configure_logging()
 
 
 @asynccontextmanager
@@ -21,13 +24,19 @@ async def lifespan(app: FastAPI):
     await cache.connect()
     print("✅ Redis connected")
 
-    start_scheduler()
-    print("Scheduler started")
+    # Every worker runs the leader loop; only the advisory-lock holder runs jobs.
+    leader = scheduler_leader.make_leader()
+    if leader is not None:
+        scheduler_leader.set_current(leader)
+        await leader.start()
+        print("Scheduler leader loop started")
 
     yield
 
     # Shutdown
-    shutdown_scheduler()
+    if leader is not None:
+        await leader.stop()
+        scheduler_leader.set_current(None)
     await cache.disconnect()
     print("Shutting down...")
 
@@ -59,14 +68,10 @@ async def root():
     }
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
 # Import and include routers
-from .routers import assets, portfolio, watchlist, markets, news, alerts, export
+from .routers import assets, portfolio, watchlist, markets, news, alerts, export, health
 
+app.include_router(health.router)
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])

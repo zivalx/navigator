@@ -82,15 +82,31 @@ def reload_alert(db, alert_id):
     return db.query(PriceAlert).filter(PriceAlert.id == alert_id).first()
 
 
+def _with_alertable_defaults(quote):
+    """Default a fake quote to an alertable one (Yahoo source, fresh marketTime)."""
+    from datetime import datetime, timezone
+
+    out = dict(quote)
+    out.setdefault("source", "yahoo")
+    out.setdefault("marketTime", datetime.now(timezone.utc).isoformat())
+    return out
+
+
 def patch_quote(monkeypatch, price):
     async def fake_get_quote(self, symbol, asset_type=None):
-        return {"symbol": symbol.upper(), "price": price, "currency": "USD"}
+        return _with_alertable_defaults(
+            {"symbol": symbol.upper(), "price": price, "currency": "USD"}
+        )
 
     monkeypatch.setattr(MarketDataService, "get_quote", fake_get_quote)
 
 
 def patch_quotes(monkeypatch, quotes_by_symbol):
     async def fake_get_quotes(self, symbols):
-        return {s: quotes_by_symbol[s] for s in symbols if s in quotes_by_symbol}
+        return {
+            s: _with_alertable_defaults(quotes_by_symbol[s])
+            for s in symbols
+            if s in quotes_by_symbol
+        }
 
     monkeypatch.setattr(MarketDataService, "get_quotes", fake_get_quotes)

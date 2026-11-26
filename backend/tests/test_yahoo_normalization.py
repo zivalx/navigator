@@ -105,44 +105,6 @@ async def test_quote_cache_key_is_v2(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_backfill_closes_normalized(db_session, monkeypatch):
-    from app.tasks import scheduler as scheduler_module
-
-    asset = Asset(
-        id=str(uuid.uuid4()), symbol="TEVA.TA", name="Teva",
-        exchange="TLV", currency=Currency.ILS,
-        asset_type=AssetType.STOCK, market_region=MarketRegion.US,
-    )
-    db_session.add(asset)
-    db_session.add(HoldingLot(
-        id=str(uuid.uuid4()), asset_id=asset.id, quantity=1, avg_cost=60,
-        cost_currency=Currency.ILS, account_name="a",
-        purchase_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    ))
-    db_session.commit()
-    asset_id = asset.id
-
-    body = _chart_body({"currency": "ILA"}, [1_700_000_000, 1_700_086_400], [6400, 6512])
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        scheduler_module.httpx, "AsyncClient",
-        lambda **kw: real_client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))),
-    )
-    monkeypatch.setattr(scheduler_module, "SessionLocal", lambda: db_session)
-
-    await scheduler_module.backfill_historical_prices()
-
-    rows = (
-        db_session.query(PriceSnapshot)
-        .filter(PriceSnapshot.asset_id == asset_id)
-        .order_by(PriceSnapshot.timestamp)
-        .all()
-    )
-    assert [r.price for r in rows] == pytest.approx([64.0, 65.12])
-    assert all(r.currency == Currency.ILS for r in rows)
-
-
-@pytest.mark.asyncio
 async def test_search_does_not_invent_usd_currency():
     """Yahoo search results carry no currency; a TASE hit must not come
     back labelled USD (callers take the currency from the quote)."""
@@ -153,3 +115,46 @@ async def test_search_does_not_invent_usd_currency():
     [hit] = await provider.search("teva")
     assert hit["symbol"] == "TEVA.TA"
     assert hit["currency"] is None
+
+
+@pytest.mark.asyncio
+async def test_yahoo_quote_carries_market_time():
+    meta = {
+        "currency": "USD",
+        "regularMarketPrice": 150.0,
+        "chartPreviousClose": 148.0,
+        "regularMarketTime": 1763740800,
+        "exchangeTimezoneName": "America/New_York",
+    }
+    provider = _provider(lambda req: httpx.Response(200, json=_chart_body(meta)))
+    quote = await provider.get_quote("AAPL")
+    assert quote["marketTime"] == "2025-11-21T16:00:00+00:00"
+    assert quote["exchangeTimezone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_provider_timestamps_are_aware_utc():
+    from app.providers.coingecko import CoinGeckoProvider
+    from app.providers.finnhub import FinnhubProvider
+    from app.providers.polygon import PolygonProvider
+
+    def parse(v):
+        return v if isinstance(v, datetime) else datetime.fromisoformat(v)
+
+    def client(body):
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+        )
+
+    y = _provider(lambda req: httpx.Response(200, json=_chart_body(
+        {"currency": "USD", "regularMarketPrice": 1.0, "chartPreviousClose": 1.0})))
+    cg = CoinGeckoProvider()
+    cg.client = client({"bitcoin": {"usd": 100.0, "usd_24h_change": 1.0, "usd_24h_vol": 5}})
+    pg = PolygonProvider(api_key="k")
+    pg.client = client({"status": "OK", "results": [{"c": 2.0, "o": 1.0, "t": 1763740800000}]})
+    fh = FinnhubProvider(api_key="k")
+    fh.client = client({"c": 2.0, "d": 1.0, "dp": 1.0, "t": 1763740800})
+
+    for q in (await y.get_quote("AAPL"), await cg.get_quote("BTC"),
+              await pg.get_quote("AAPL"), await fh.get_quote("AAPL")):
+        assert parse(q["timestamp"]).utcoffset().total_seconds() == 0

@@ -21,6 +21,7 @@ import pandas as pd
 import yfinance as yf
 
 from ..cache import cache
+from .log_redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +165,7 @@ async def compute_and_store_breadth() -> None:
     try:
         symbols = await fetch_sp500_constituents()
         if not symbols:
-            logger.warning("Breadth: no constituents available, skipping computation")
-            return
+            raise RuntimeError("Breadth: no constituents available")
 
         all_closes = []
         for chunk_symbols in _chunk(symbols, CHUNK_SIZE):
@@ -177,12 +177,11 @@ async def compute_and_store_breadth() -> None:
                 logger.warning(
                     "Breadth: chunk download failed for %d symbols (%s)",
                     len(chunk_symbols),
-                    e,
+                    redact_secrets(e),
                 )
 
         if not all_closes:
-            logger.warning("Breadth: no price data downloaded, skipping computation")
-            return
+            raise RuntimeError("Breadth: no price data downloaded")
 
         closes = pd.concat(all_closes, axis=1).sort_index()
         results = compute_breadth_from_closes(closes)
@@ -197,7 +196,8 @@ async def compute_and_store_breadth() -> None:
             results["s5th"]["value"],
         )
     except Exception as e:
-        logger.error("Breadth: computation job failed: %s", e)
+        logger.error("Breadth: computation job failed: %s", redact_secrets(e))
+        raise  # the heartbeat wrapper records the failure
 
 
 async def get_cached_breadth(key: str) -> Optional[Dict]:

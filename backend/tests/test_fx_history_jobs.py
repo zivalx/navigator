@@ -124,12 +124,14 @@ async def test_eod_job_refreshes_fx_before_rollup(eval_db, monkeypatch):
     async def fake_quote(self, symbol, asset_type):
         return {"price": 120.0, "currency": "USD"}
 
-    async def fake_compute(self, day):
+    async def fake_compute(self, day, *args, **kwargs):
         order.append("compute")
 
     monkeypatch.setattr(scheduler, "refresh_fx_history", fake_refresh)
     monkeypatch.setattr(scheduler.MarketDataService, "get_quote", fake_quote)
     monkeypatch.setattr(PortfolioService, "compute_daily_snapshot", fake_compute)
+    # Every held asset counts as priced today, so the portfolio rollup runs.
+    monkeypatch.setattr(scheduler, "_unpriced_for_day", lambda *a, **k: 0)
 
     await scheduler.snapshot_eod_prices()
 

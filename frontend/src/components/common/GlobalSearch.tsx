@@ -3,14 +3,16 @@ import { Search, Star, Loader2, Check } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { api, buildCreateAssetPayload, assetCreateErrorMessage } from '@/lib/api';
 import { usePortfolio } from '@/contexts/PortfolioContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
+import { cn, exchangeLabel } from '@/lib/utils';
 
 interface SearchResult {
   symbol: string;
   name: string;
   exchange?: string;
+  /** Yahoo's display name for the venue, used when the code is unknown. */
+  exchange_name?: string | null;
   asset_type: string;
   /** Unknown (null) for API search hits: Yahoo search returns no currency. */
   currency?: string | null;
@@ -227,8 +229,13 @@ export function GlobalSearch() {
                       <span className={cn('text-xs font-medium', typeColor(asset.asset_type))}>
                         {typeLabel(asset.asset_type)}
                       </span>
-                      {asset.exchange && (
-                        <span className="text-xs text-muted-foreground">{asset.exchange}</span>
+                      {(asset.exchange || asset.exchange_name) && (
+                        <span className="text-xs text-muted-foreground" title={asset.exchange}>
+                          {exchangeLabel(asset.exchange, asset.exchange_name)}
+                        </span>
+                      )}
+                      {asset.currency && (
+                        <span className="text-xs text-muted-foreground/70">{asset.currency}</span>
                       )}
                     </div>
                     <span className="text-sm text-muted-foreground truncate block">
@@ -236,7 +243,6 @@ export function GlobalSearch() {
                     </span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {asset.asset_type !== 'index' && (
                     <button
                       onClick={(e) => handleStarClick(e, asset)}
                       className={cn(
@@ -249,7 +255,6 @@ export function GlobalSearch() {
                     >
                       <Star className={cn('h-4 w-4', watched && 'fill-current')} />
                     </button>
-                    )}
                   </div>
                 </div>
               );

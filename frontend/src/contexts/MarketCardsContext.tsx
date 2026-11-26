@@ -1,6 +1,12 @@
 import type { MarketRegion } from '@/lib/types';
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef } from 'react';
-import { MarketCard, MarketCardData, defaultMarketCards } from '@/lib/marketCardTypes';
+import {
+  MarketCard,
+  MarketCardData,
+  defaultMarketCards,
+  seedIsraelCards,
+  IL_CARDS_SEEDED_KEY,
+} from '@/lib/marketCardTypes';
 import { api } from '@/lib/api';
 import { useAppSettings } from '@/contexts/AppSettingsContext';
 
@@ -20,7 +26,8 @@ const MarketCardsContext = createContext<MarketCardsContextType | undefined>(und
 export function MarketCardsProvider({ children }: { children: ReactNode }) {
   const [cards, setCards] = useState<MarketCard[]>(() => {
     const saved = localStorage.getItem('marketCards');
-    return saved ? JSON.parse(saved) : defaultMarketCards;
+    if (!saved) return defaultMarketCards;
+    return seedIsraelCards(JSON.parse(saved), localStorage.getItem(IL_CARDS_SEEDED_KEY) === '1');
   });
   const [prices, setPrices] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string }>>({});
   const [isEditMode, setEditMode] = useState(false);
@@ -30,6 +37,7 @@ export function MarketCardsProvider({ children }: { children: ReactNode }) {
   // Save to localStorage
   useEffect(() => {
     localStorage.setItem('marketCards', JSON.stringify(cards));
+    localStorage.setItem(IL_CARDS_SEEDED_KEY, '1');
   }, [cards]);
 
   // Fetch real prices for all card symbols

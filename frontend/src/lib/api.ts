@@ -115,8 +115,10 @@ export const api = {
   searchAssets: (query: string) => request<any[]>(`/markets/search?q=${encodeURIComponent(query)}`),
 
   // Movers
-  getTopGainers: (limit = 5) => request<any[]>(`/markets/movers/gainers?limit=${limit}`),
-  getTopLosers: (limit = 5) => request<any[]>(`/markets/movers/losers?limit=${limit}`),
+  getTopGainers: (limit = 5, region = "US") =>
+    request<any[]>(`/markets/movers/gainers?limit=${limit}&region=${region}`),
+  getTopLosers: (limit = 5, region = "US") =>
+    request<any[]>(`/markets/movers/losers?limit=${limit}&region=${region}`),
 
   // Indicators (Fear & Greed, VIX, indices, rates, fx, commodities, crypto, breadth)
   getIndicators: (keys?: string[]) =>

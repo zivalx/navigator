@@ -1,0 +1,391 @@
+"""SchedulerLeader with a mocked lock and a fake scheduler (no Postgres)."""
+import asyncio
+import logging
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
+
+from app.config import settings
+from app.models.job_heartbeat import JobHeartbeat
+from app.tasks import heartbeat, leader as leader_module
+from app.tasks.leader import (
+    AlwaysLeaderLock,
+    PgAdvisoryLock,
+    SchedulerLeader,
+    is_leader,
+    make_leader,
+    set_current,
+)
+
+
+class FakeLock:
+    """`acquire` / `ping` are sequences of results; an exception instance is raised."""
+
+    def __init__(self, acquire=(True,), ping=(True,), events=None):
+        self._acquire = list(acquire)
+        self._ping = list(ping)
+        self.events = events if events is not None else []
+
+    @staticmethod
+    def _next(seq):
+        value = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def try_acquire(self) -> bool:
+        return self._next(self._acquire)
+
+    def ping(self) -> bool:
+        return self._next(self._ping)
+
+    def release(self) -> None:
+        self.events.append("release")
+
+
+class FakeScheduler:
+    def __init__(self, events):
+        self.events = events
+        self.started = False
+        self.shutdown_calls = []
+
+    def start(self):
+        self.started = True
+
+    def shutdown(self, wait=True):
+        self.shutdown_calls.append(wait)
+        self.events.append("shutdown")
+
+
+class Factory:
+    def __init__(self, events=None):
+        self.events = events if events is not None else []
+        self.calls = []  # startup_at of each call
+        self.built = []
+
+    def __call__(self, startup_at=None):
+        self.calls.append(startup_at)
+        fake = FakeScheduler(self.events)
+        self.built.append(fake)
+        return fake
+
+
+@pytest.fixture(autouse=True)
+def hb_db(db_session, monkeypatch):
+    """Heartbeat writes go to the test's in-memory DB, never settings.database_url."""
+    monkeypatch.setattr(heartbeat, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    return db_session
+
+
+def row(db_session, name):
+    db_session.expire_all()
+    return db_session.get(JobHeartbeat, name)
+
+
+@pytest.mark.asyncio
+async def test_follower_never_builds_scheduler():
+    factory = Factory()
+    leader = SchedulerLeader(FakeLock(acquire=[False]), scheduler_factory=factory)
+    for _ in range(3):
+        await leader.tick()
+    assert len(factory.calls) == 0 and not leader.is_leader
+
+
+@pytest.mark.asyncio
+async def test_acquire_starts_scheduler_and_stamps_heartbeat(db_session):
+    factory = Factory()
+    leader = SchedulerLeader(FakeLock(), scheduler_factory=factory, startup_delay=15)
+    before = datetime.now(timezone.utc)
+    await leader.tick()
+    fake = factory.built[0]
+    assert len(factory.calls) == 1 and fake.started and leader.is_leader
+    assert row(db_session, "scheduler_leader").last_started_at is not None
+    # leader_startup is scheduled startup_delay after acquiring
+    startup_at = factory.calls[0]
+    assert before + timedelta(seconds=15) <= startup_at <= datetime.now(timezone.utc) + timedelta(seconds=15)
+
+
+@pytest.mark.asyncio
+async def test_leader_tick_stamps_success(db_session):
+    factory = Factory()
+    leader = SchedulerLeader(FakeLock(ping=[True]), scheduler_factory=factory)
+    await leader.tick()
+    assert row(db_session, "scheduler_leader").last_success_at is None
+    await leader.tick()
+    hb = row(db_session, "scheduler_leader")
+    assert hb.last_success_at is not None and len(factory.calls) == 1
+    assert hb.last_started_at is not None  # the upsert touched only the given field
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ping", [False, OperationalError("SELECT pg_backend_pid()", {}, Exception("gone"))])
+async def test_ping_failure_shuts_scheduler_down(ping):
+    events = []
+    lock = FakeLock(ping=[ping], events=events)
+    factory = Factory(events)
+    leader = SchedulerLeader(lock, scheduler_factory=factory)
+    await leader.tick()  # acquire
+    await leader.tick()  # ping fails
+    fake = factory.built[0]
+    assert fake.shutdown_calls == [False] and not leader.is_leader
+    assert events == ["shutdown", "release"]  # connection dropped after the scheduler stops
+
+
+@pytest.mark.asyncio
+async def test_demoted_leader_can_lead_again():
+    factory = Factory()
+    leader = SchedulerLeader(FakeLock(acquire=[True], ping=[False]), scheduler_factory=factory)
+    await leader.tick()  # acquire
+    await leader.tick()  # ping fails, demote
+    await leader.tick()  # acquire again with a fresh scheduler
+    assert leader.is_leader and len(factory.calls) == 2 and factory.built[1].started
+
+
+def _errors(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "app.tasks.leader" and r.levelno == logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_failed_start_gives_the_lock_back(caplog):
+    lock = FakeLock()
+
+    def broken_factory(startup_at=None):
+        raise RuntimeError("bad job config")
+
+    leader = SchedulerLeader(lock, scheduler_factory=broken_factory)
+    with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+        await leader.tick()  # logged, not raised
+    assert not leader.is_leader and lock.events == ["release"]
+    assert _errors(caplog) == ["scheduler leader tick failed: bad job config"]
+
+
+@pytest.mark.asyncio
+async def test_loop_survives_lock_errors(caplog):
+    err = OperationalError("SELECT pg_try_advisory_lock(7400418)", {}, Exception("server closed the connection"))
+    lock = FakeLock(acquire=[err, True])
+    leader = SchedulerLeader(lock, scheduler_factory=Factory(), interval=0.01)
+    with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+        await leader.start()
+        try:
+            for _ in range(200):
+                if leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            assert leader.is_leader
+        finally:
+            await leader.stop()
+    errors = _errors(caplog)
+    assert len(errors) == 1
+    assert errors[0].startswith("scheduler leader tick failed: (builtins.Exception) server closed the connection")
+
+
+@pytest.mark.asyncio
+async def test_stop_shuts_down_then_releases():
+    events = []
+    leader = SchedulerLeader(FakeLock(events=events), scheduler_factory=Factory(events), interval=60)
+    await leader.start()
+    for _ in range(200):
+        if leader.is_leader:
+            break
+        await asyncio.sleep(0.01)
+    await leader.stop()
+    assert events == ["shutdown", "release"] and not leader.is_leader
+
+
+@pytest.mark.asyncio
+async def test_follower_stop_only_releases():
+    events = []
+    leader = SchedulerLeader(FakeLock(acquire=[False], events=events), scheduler_factory=Factory(events))
+    await leader.tick()
+    await leader.stop()
+    assert events == ["release"]
+
+
+@pytest.mark.asyncio
+async def test_module_is_leader_follows_current():
+    leader = SchedulerLeader(FakeLock(), scheduler_factory=Factory())
+    try:
+        set_current(None)
+        assert is_leader() is False
+        set_current(leader)
+        assert is_leader() is False
+        await leader.tick()
+        assert is_leader() is True
+    finally:
+        set_current(None)
+
+
+def test_scheduler_disabled_gives_no_leader(monkeypatch):
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
+    assert make_leader() is None
+
+
+def test_sqlite_url_is_always_leader(monkeypatch):
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    monkeypatch.setattr(settings, "database_url", "sqlite:///./navigator.db")
+    assert isinstance(make_leader()._lock, AlwaysLeaderLock)
+
+
+def test_postgres_url_gets_advisory_lock(monkeypatch):
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost:1/x")
+    lock = make_leader()._lock  # builds an engine; connects only on try_acquire
+    assert isinstance(lock, PgAdvisoryLock) and lock.backend_pid() is None
+    assert leader_module.SCHEDULER_LEADER_INTERVAL_SECONDS == 30
+
+
+class BlockingPingLock(FakeLock):
+    """ping() blocks its thread until `unblock` is set (a half-open socket)."""
+
+    def __init__(self, events):
+        super().__init__(events=events)
+        self.unblock = threading.Event()
+        self.ping_returned = threading.Event()
+
+    def ping(self) -> bool:
+        self.unblock.wait(timeout=10)
+        self.ping_returned.set()
+        return True
+
+
+async def _wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stuck_ping_demotes_and_releases_only_after_it_returns():
+    events = []
+    lock = BlockingPingLock(events)
+    factory = Factory(events)
+    leader = SchedulerLeader(lock, scheduler_factory=factory, call_timeout=0.05)
+    try:
+        await leader.tick()  # acquire
+        await leader.tick()  # ping hangs past call_timeout
+        assert not leader.is_leader and factory.built[0].shutdown_calls == [False]
+        await leader.tick()  # ping still stuck: the connection is left alone
+        assert events == ["shutdown"] and len(factory.calls) == 1
+    finally:
+        lock.unblock.set()
+    await asyncio.to_thread(lock.ping_returned.wait, 2)
+    await _wait_for(lambda: leader._inflight.done())
+    await leader.tick()  # the stuck call returned: release, then race for the lock again
+    assert events == ["shutdown", "release"]
+    assert leader.is_leader and len(factory.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_gives_up_on_a_stuck_tick_without_releasing(monkeypatch):
+    monkeypatch.setattr(leader_module, "_STOP_WAIT_SECONDS", 0.2)
+    events = []
+    lock = BlockingPingLock(events)
+    # call_timeout far above the stop wait: the loop task itself is stuck in the ping
+    leader = SchedulerLeader(lock, scheduler_factory=Factory(events), interval=0.01, call_timeout=60)
+    await leader.start()
+    try:
+        await _wait_for(lambda: leader.is_leader)
+        await asyncio.sleep(0.05)  # the second tick is now blocked in ping()
+        started = time.monotonic()
+        await leader.stop()
+        assert time.monotonic() - started < 2
+        assert events == ["shutdown"] and not leader.is_leader  # release never called
+    finally:
+        lock.unblock.set()
+        await asyncio.to_thread(lock.ping_returned.wait, 2)
+
+
+class StuckPingAndReleaseLock:
+    """ping() and release() block until their events are set; counts how many
+    lock calls run at once (must never exceed one)."""
+
+    def __init__(self):
+        self.ping_gate = threading.Event()
+        self.release_gate = threading.Event()
+        self.ping_done = threading.Event()
+        self.release_done = threading.Event()
+        self.calls = []
+        self.active = 0
+        self.max_active = 0
+        self._mu = threading.Lock()
+
+    def _call(self, name, gate=None, done=None, result=None):
+        with self._mu:
+            self.calls.append(name)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if gate is not None:
+                gate.wait(timeout=10)
+            return result
+        finally:
+            with self._mu:
+                self.active -= 1
+            if done is not None:
+                done.set()
+
+    def try_acquire(self):
+        return self._call("try_acquire", result=True)
+
+    def ping(self):
+        return self._call("ping", self.ping_gate, self.ping_done, result=True)
+
+    def release(self):
+        return self._call("release", self.release_gate, self.release_done)
+
+
+@pytest.mark.asyncio
+async def test_lock_calls_never_overlap_when_ping_and_release_both_hang():
+    lock = StuckPingAndReleaseLock()
+    leader = SchedulerLeader(lock, scheduler_factory=Factory(), call_timeout=0.05)
+    try:
+        await leader.tick()  # acquire
+        assert leader.is_leader
+        await leader.tick()  # ping hangs -> demoted
+        assert not leader.is_leader
+        for _ in range(3):
+            await leader.tick()  # ping still running: no new call
+        assert lock.calls == ["try_acquire", "ping"]
+
+        lock.ping_gate.set()
+        await asyncio.to_thread(lock.ping_done.wait, 2)
+        await _wait_for(lambda: leader._inflight.done())
+        await leader.tick()  # cleanup release hangs past call_timeout -> tick returns
+        for _ in range(3):
+            await leader.tick()  # release still running: no try_acquire queued behind it
+            assert not leader.is_leader
+        assert lock.calls == ["try_acquire", "ping", "release"]
+        assert lock.max_active == 1
+    finally:
+        lock.ping_gate.set()
+        lock.release_gate.set()
+    await asyncio.to_thread(lock.release_done.wait, 2)
+    await _wait_for(lambda: leader._inflight.done())
+    await leader.tick()  # all calls finished: clean up, then lead again
+    assert leader.is_leader and lock.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stamp_timeout_is_logged_by_name(monkeypatch, caplog):
+    stamp_gate = threading.Event()
+    monkeypatch.setattr(heartbeat, "upsert_heartbeat", lambda *a, **k: stamp_gate.wait(timeout=2))
+    leader = SchedulerLeader(FakeLock(), scheduler_factory=Factory(), call_timeout=0.05)
+    try:
+        with caplog.at_level(logging.ERROR, logger="app.tasks.leader"):
+            await leader.tick()
+    finally:
+        stamp_gate.set()
+    assert leader.is_leader  # a slow heartbeat never costs leadership
+    assert _errors(caplog) == ["scheduler leader: heartbeat scheduler_leader (last_started_at) timed out after 0.05s"]
+
+
+def test_lock_connect_args_append_to_url_options():
+    plain = leader_module._lock_connect_args("postgresql://u:p@h/db")
+    assert plain["options"] == leader_module._SERVER_TCP and plain["tcp_user_timeout"] == 20000
+    merged = leader_module._lock_connect_args("postgresql://u:p@h/db?options=-csearch_path%3Dapp")
+    assert merged["options"] == "-csearch_path=app " + leader_module._SERVER_TCP

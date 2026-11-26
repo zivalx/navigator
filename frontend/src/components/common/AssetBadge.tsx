@@ -13,6 +13,7 @@ export function AssetTypeBadge({ type, className }: AssetBadgeProps) {
     etf: { label: 'ETF', className: 'bg-accent/10 text-accent border-accent/20' },
     crypto: { label: 'Crypto', className: 'bg-warning/10 text-warning border-warning/20' },
     fund: { label: 'Fund', className: 'bg-success/10 text-success border-success/20' },
+    index: { label: 'Index', className: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' },
     other: { label: 'Other', className: 'bg-muted/50 text-muted-foreground border-muted' },
   };
 

@@ -12,6 +12,13 @@ _URL_QUERY = re.compile(r"(https?://[^\s?#'\"<>]+)\?[^\s#'\"<>]*")
 _KEY_PARAM = re.compile(
     r"(?i)\b(token|api_?key|api_token|access_token|secret)=[^&\s'\"<>]+"
 )
+# SQLAlchemy appends "[parameters: (...)]" to DB errors: bound values (costs,
+# quantities). Strip it, even when the text is cut off before the closing "]".
+_SQL_PARAMETERS = re.compile(
+    r"\[parameters: .*?(?:\](?=\s*(?:\(Background|\Z))|\Z)", re.DOTALL
+)
+# Greedy up to the LAST "@" of the token: a password may itself hold "/" or "@".
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s'\"<>]*@")
 _REDACTED = "<redacted>"
 
 
@@ -27,9 +34,12 @@ def _configured_keys() -> list[str]:
 
 
 def redact_secrets(value) -> str:
-    """`str(value)` with URL query strings, key-like params and configured
-    provider keys replaced by <redacted>."""
+    """`str(value)` with SQL `[parameters: ...]` and URL userinfo masked, and URL
+    query strings, key-like params and configured provider keys replaced by
+    <redacted>."""
     text = str(value)
+    text = _SQL_PARAMETERS.sub(f"[parameters: {_REDACTED}]", text)
+    text = _URL_USERINFO.sub(r"\1***@", text)
     text = _URL_QUERY.sub(rf"\1?{_REDACTED}", text)
     text = _KEY_PARAM.sub(rf"\1={_REDACTED}", text)
     for key in _configured_keys():

@@ -21,6 +21,8 @@ export const indicatorRegistry: IndicatorMeta[] = [
   { key: 'dax', label: 'DAX', category: 'index' },
   { key: 'smi', label: 'SMI (Swiss)', category: 'index' },
   { key: 'nikkei', label: 'Nikkei 225', category: 'index' },
+  { key: 'ta35', label: 'TA-35', category: 'index' },
+  { key: 'ta125', label: 'TA-125', category: 'index' },
   { key: 'us10y', label: 'US 10Y Yield', category: 'rates' },
   { key: 'us30y', label: 'US 30Y Yield', category: 'rates' },
   { key: 'dxy', label: 'Dollar Index', category: 'fx' },

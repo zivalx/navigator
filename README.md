@@ -121,6 +121,20 @@ With the backend running: http://localhost:7000/docs
 
 See [backend/README.md](backend/README.md) for full API reference.
 
+### Building behind a TLS-inspecting proxy (local only)
+
+If your network re-signs HTTPS with a corporate root CA, image builds fail with `UnknownIssuer`. Pass the
+public root certificate as an optional BuildKit secret (`corp_ca`); it is mounted only during the `pip install`
+and `npm ci` steps and is never copied into an image layer, `ENV` or the repo:
+
+```
+CORP_CA=/path/to/root-ca.pem sh scripts/build-images.sh
+# or: docker build --secret id=corp_ca,src=/path/to/root-ca.pem -f backend/Dockerfile.prod backend
+```
+
+Without `CORP_CA` (as in `scripts/deploy.sh` on the server) the build is unchanged. Certificate verification
+is never disabled, and package-firewall blocks are not worked around.
+
 ## Deployment
 
 See [TODO-DEPLOYMENT.md](TODO-DEPLOYMENT.md) for the production deployment plan (Hetzner VPS + Cloudflare).

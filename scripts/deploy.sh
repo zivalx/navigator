@@ -1,16 +1,14 @@
 #!/bin/bash
-# Deploy / update Navigator on the VPS (Phase 2.3 + 3 of TODO-DEPLOYMENT.md).
+# Deploy / update Navigator on the VPS.
 # Run ON the server, from the repo root (default /opt/navigator):
 #     cd /opt/navigator && ./scripts/deploy.sh
 #
-# Idempotent: safe to re-run for updates. On first run it bootstraps a
-# Let's Encrypt certificate (temp self-signed -> start nginx -> certbot issues
-# the real cert -> reload). On later runs it just pulls and redeploys.
+# TLS, basic auth and the public listener live at the shared edge Caddy
+# (zivalx-ops). Navigator only joins the external `edge` network through
+# navigator-nginx and publishes no ports. Idempotent: safe to re-run.
 #
-# Prerequisites on the box (handled by cloud-init.yml): Docker + compose,
-# ufw (22/80/443), repo cloned. You must create two secret files first:
-#     .env.prod          (cp .env.prod.example .env.prod, fill real values)
-#     nginx/.htpasswd    (htpasswd -B -c nginx/.htpasswd <user>)
+# Prerequisites: the zivalx-ops edge setup has run (network `edge` exists) and
+# .env.prod exists (cp .env.prod.example .env.prod, fill real values).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,68 +16,70 @@ COMPOSE="docker compose --env-file .env.prod -f docker-compose.prod.yml"
 
 # --- preflight -------------------------------------------------------------
 [ -f .env.prod ] || { echo "ERROR: .env.prod missing. cp .env.prod.example .env.prod and fill it."; exit 1; }
-[ -s nginx/.htpasswd ] || { echo "ERROR: nginx/.htpasswd missing/empty. Run: htpasswd -B -c nginx/.htpasswd <user>"; exit 1; }
+grep -qx 'POSTGRES_DB=navigator' .env.prod \
+    || { echo "ERROR: POSTGRES_DB must be 'navigator' in .env.prod"; exit 1; }
+docker network inspect edge >/dev/null 2>&1 \
+    || { echo "ERROR: docker network 'edge' not found: run the zivalx-ops edge setup first"; exit 1; }
 
-# Load DOMAIN + CERTBOT_EMAIL from .env.prod (only those two, safely).
-DOMAIN="$(grep -E '^DOMAIN=' .env.prod | cut -d= -f2-)"
-CERTBOT_EMAIL="$(grep -E '^CERTBOT_EMAIL=' .env.prod | cut -d= -f2-)"
-[ -n "$DOMAIN" ] || { echo "ERROR: DOMAIN not set in .env.prod"; exit 1; }
-[ -n "$CERTBOT_EMAIL" ] || { echo "ERROR: CERTBOT_EMAIL not set in .env.prod"; exit 1; }
-echo "=== Deploying Navigator for $DOMAIN ==="
+# --- 1. pre-deploy dump (skipped only on a first deploy) --------------------
+# A container that exists but is stopped holds data: refuse to deploy over it
+# without a dump, instead of skipping the dump.
+pg_state="$(docker inspect -f '{{.State.Running}}' navigator-postgres 2>/dev/null || true)"
+if [ "$pg_state" = "false" ]; then
+    echo "ERROR: navigator-postgres exists but is not running; start it (docker start navigator-postgres) so it can be dumped, then re-run"
+    exit 1
+fi
+if [ "$pg_state" = "true" ]; then
+    echo "### pre-deploy database dump"
+    if [ -x /opt/zivalx-ops/backup/zbackup ]; then
+        /opt/zivalx-ops/backup/zbackup dump navigator
+    else
+        BACKUP_DIR=/var/backups/navigator
+        (umask 077; mkdir -p "$BACKUP_DIR")
+        TS="$(date -u +%Y%m%dT%H%M%SZ)"
+        OUT="$BACKUP_DIR/predeploy-$TS.dump"
+        (
+            umask 077
+            docker exec navigator-postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$OUT"
+        ) || { rm -f "$OUT"; echo "ERROR: pre-deploy dump failed"; exit 1; }
+        echo "    wrote $OUT"
+        # keep the newest 5
+        ls -1t "$BACKUP_DIR"/predeploy-*.dump 2>/dev/null | tail -n +6 | while IFS= read -r old; do rm -f -- "$old"; done
+    fi
+else
+    echo "### navigator-postgres does not exist: skipping pre-deploy dump (first deploy)"
+fi
 
-# --- pull latest -----------------------------------------------------------
+# --- 2. pull latest --------------------------------------------------------
 echo "### git pull"
 git pull --ff-only
 
-# Docker volume names are <project>_<vol>; project defaults to the dir name.
-PROJECT="$(basename "$(pwd)")"
-CONF_VOL="${PROJECT}_certbot_conf"
+# --- 3/4. build and start (the api entrypoint runs migrations) -------------
+echo "### build"
+$COMPOSE build
+echo "### up"
+$COMPOSE up -d
 
-cert_exists() {
-    docker run --rm -v "${CONF_VOL}:/etc/letsencrypt" alpine \
-        test -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" 2>/dev/null
-}
+# --- 5. wait for the api to report healthy (<= 180 s) ----------------------
+echo "### waiting for navigator-api to be healthy (up to 180 s)"
+healthy=""
+for _ in $(seq 36); do
+    state="$(docker inspect -f '{{.State.Health.Status}}' navigator-api 2>/dev/null || true)"
+    if [ "$state" = "healthy" ]; then healthy=1; break; fi
+    sleep 5
+done
+[ -n "$healthy" ] || { echo "ERROR: navigator-api not healthy after 180 s: check: $COMPOSE logs api"; exit 1; }
 
-if cert_exists; then
-    # --- routine update path -----------------------------------------------
-    echo "### Real certificate present — building and (re)starting the stack"
-    $COMPOSE up -d --build
-else
-    # --- first-time SSL bootstrap ------------------------------------------
-    echo "### No certificate yet — bootstrapping Let's Encrypt"
-    echo "    NOTE: the domain must already point at this server, and (if using"
-    echo "    Cloudflare) be set to DNS-only (grey cloud) so the HTTP-01"
-    echo "    challenge on port 80 reaches the origin. Flip to proxied after."
+# --- 6. deep health status (status field only) -----------------------------
+echo "### /health/deep status"
+docker exec navigator-api curl -sS http://localhost:7000/health/deep \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", "unknown"))' \
+    || echo "    (could not read /health/deep)"
 
-    echo "### 1/4 seeding a temporary self-signed cert so nginx can start"
-    docker run --rm -v "${CONF_VOL}:/etc/letsencrypt" --entrypoint sh alpine/openssl -c "
-        mkdir -p /etc/letsencrypt/live/${DOMAIN} &&
-        openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-          -keyout /etc/letsencrypt/live/${DOMAIN}/privkey.pem \
-          -out /etc/letsencrypt/live/${DOMAIN}/fullchain.pem \
-          -subj '/CN=${DOMAIN}'"
-
-    echo "### 2/4 starting the stack (nginx now serves the ACME challenge on :80)"
-    $COMPOSE up -d --build
-
-    echo "### 3/4 requesting the real certificate via certbot webroot"
-    # Remove the self-signed dir so certbot writes a clean live/${DOMAIN}.
-    docker run --rm -v "${CONF_VOL}:/etc/letsencrypt" alpine \
-        rm -rf "/etc/letsencrypt/live/${DOMAIN}" "/etc/letsencrypt/archive/${DOMAIN}" \
-               "/etc/letsencrypt/renewal/${DOMAIN}.conf"
-    $COMPOSE run --rm --entrypoint certbot certbot certonly \
-        --webroot -w /var/www/certbot \
-        -d "${DOMAIN}" \
-        --email "${CERTBOT_EMAIL}" --agree-tos --no-eff-email --non-interactive
-
-    echo "### 4/4 reloading nginx with the real certificate"
-    $COMPOSE exec nginx nginx -s reload
+# --- 7. nothing may be published on the host -------------------------------
+if [ -n "$(docker port navigator-nginx 2>/dev/null)" ]; then
+    echo "ERROR: navigator-nginx publishes host ports; it must only join the edge network"
+    exit 1
 fi
-
-echo ""
-echo "=== Done. Health check: ==="
-sleep 3
-curl -fsS "https://${DOMAIN}/health" && echo "  ^ /health OK" || echo "  /health not reachable yet — check: $COMPOSE logs nginx"
-echo ""
-echo "Visit https://${DOMAIN}/ — you'll get the Basic Auth login prompt."
-echo "Logs:   $COMPOSE logs -f"
+echo "=== Done. navigator-nginx is reachable on the edge network only. ==="
+echo "Logs: $COMPOSE logs -f"

@@ -5,7 +5,7 @@ React SPA for Navigator — portfolio tracking, watchlists, market data, and mar
 ## Stack
 
 - **React 18** + **TypeScript**, built with **Vite** (`@vitejs/plugin-react-swc`)
-- **React Router** (`react-router-dom`) for client-side routing
+- **React Router** v7 (`react-router`) for client-side routing
 - **TanStack React Query** for server-state (currently only `QueryClientProvider` is wired up in `App.tsx`; most data fetching today goes through the context layer, see below)
 - **shadcn/ui** components on top of **Radix UI** primitives, styled with **Tailwind CSS**
 - **next-themes**-style light/dark theming via a custom `ThemeContext` (see Theming)

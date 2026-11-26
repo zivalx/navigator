@@ -7,13 +7,15 @@ and watchlists. Backend is FastAPI/Postgres/Redis; frontend is React/Vite/TypeSc
 
 ```
 backend/app/
-  routers/     # FastAPI endpoints (assets, portfolio, watchlist, markets, news)
-  services/    # business logic (market_data, portfolio, fx, news)
+  routers/     # FastAPI endpoints (assets, portfolio, watchlist, markets, news, alerts, export, health)
+  services/    # business logic (market_data, portfolio, fx, news, indicators, eod, sessions, health)
   providers/   # external API clients (yahoo, coingecko, polygon, finnhub,
                # alphavantage, cnn, alternative_me)
-  tasks/       # APScheduler jobs (scheduler.py)
+  tasks/       # APScheduler jobs (scheduler.py), leader election (leader.py), heartbeats (heartbeat.py)
+  locks.py, migrate.py, legacy_schema.py   # advisory-lock keys, `python -m app.migrate`, legacy-DB adoption
   models/ schemas/  # SQLAlchemy models, Pydantic schemas
   config.py    # Settings (env-driven), database.py, cache.py, main.py
+backend/alembic/versions/   # schema revisions (Alembic owns the Postgres schema)
 backend/scripts/   # one-off ops scripts (audit_asset_currencies.py)
 backend/seed.py, seed_watchlists.py   # sample data
 frontend/src/
@@ -29,18 +31,23 @@ docs/superpowers/specs/   # design docs for recent features (P&L, market indicat
 Backend (from `backend/`):
 ```bash
 cp .env.example .env        # fill in API keys (all optional, see below)
-docker-compose up -d        # postgres:15, redis:7, and the api container
+docker-compose up -d        # postgres:15, redis:7, and the api container (entrypoint migrates first)
 docker-compose exec api python seed.py          # sample assets/holdings
 docker-compose exec api python seed_watchlists.py  # optional sample watchlists
 ```
 This starts the API on **port 7000** (`docker-compose.yml` maps `7000:7000`; `Dockerfile`
 CMD runs `uvicorn app.main:app --host 0.0.0.0 --port 7000`). Docs at
-`http://localhost:7000/docs`, health at `/health`. There is no Alembic migration
-history yet despite being in `requirements.txt` — `database.py: init_db()` just calls
-`Base.metadata.create_all()` on startup.
+`http://localhost:7000/docs`, health at `/health` (shallow) and `/health/deep`.
+
+**Alembic owns the Postgres schema.** `docker-entrypoint.sh` runs `python -m app.migrate`
+before the app starts; a failed migration exits the container. `init_db()` does no DDL on
+Postgres: it only raises if the DB revision is not the code's head (SQLite, used by tests,
+still uses `create_all()`).
 
 Local (non-Docker) alternative: `pip install -r requirements.txt`, run Postgres/Redis
-yourself, `python seed.py`, then `uvicorn app.main:app --reload --port 7000`.
+yourself, then **`python -m app.migrate`** (re-run it after every pull that adds a
+revision), `python seed.py` (needs the schema, so migrate first), then
+`uvicorn app.main:app --reload --port 7000`.
 
 Frontend (from `frontend/`):
 ```bash
@@ -72,6 +79,9 @@ fallback providers / features, none are required to run:
 - `EXCHANGERATE_API_KEY` — live FX rates
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — reserved for future AI features, not yet wired into any router/service
 - `DATABASE_URL`, `REDIS_URL` — default to the docker-compose service names/ports
+- `SCHEDULER_ENABLED` — default `true`; `false` skips the scheduler leader loop entirely
+  (this process runs no jobs), e.g. for a second API process or a one-off shell
+- `EXPORT_TOKEN` — `X-Export-Token` for `GET /api/export/positions` (trender); empty = 503
 - `CORS_ORIGINS` — comma-separated list, see `config.py`
 
 See `backend/.env.example` for the full list and `backend/app/config.py` (`Settings`)
@@ -89,31 +99,78 @@ for defaults.
 - **Redis caching (`app/cache.py`)** with TTLs from `config.py`: quotes 60s
   (`quote_cache_ttl`), news 15min (`news_cache_ttl`), FX 1hr (`fx_cache_ttl`),
   indicators 15min (`indicators_cache_ttl`).
-- **APScheduler jobs** (`app/tasks/scheduler.py`, started in `main.py` lifespan):
-  - `eod_snapshot` — daily EOD price snapshot at 16:30 US/Eastern for every held
-    asset; powers historical P&L. Refreshes the daily FX history (`refresh_fx_history`)
-    first, then rolls up today's `portfolio_snapshots` row.
-  - `backfill_historical` — one-off, runs 15s after startup, backfills ~6 months of
-    daily closes from Yahoo's chart API when fewer than 5 EOD snapshots exist.
-  - `backfill_daily_pnl` — one-off, 45s after startup: refreshes `fx_daily_rates`, then
-    (once, guarded by the `fx_history_rebuild` marker) deletes and rebuilds
-    `portfolio_snapshots` at each day's FX rate; otherwise populates it only if empty.
-- **Market indicators feature (in progress)**: design doc at
-  `docs/superpowers/specs/2026-07-23-market-indicators-design.md`. Planned API surface
-  is `GET /api/markets/indicators?keys=...`. As of this writing the frontend
-  (`IndicatorsStrip`, `IndicatorTile`, `IndicatorsCustomizeDialog`, `FearGreedGauge`,
-  `useIndicatorPrefs`, `lib/indicatorTypes.ts`) already calls this endpoint, and the
-  providers it needs (`app/providers/cnn.py` for CNN Fear & Greed,
-  `app/providers/alternative_me.py` for Crypto Fear & Greed) and
-  `config.indicators_cache_ttl` exist, but there is no `/indicators` route in
-  `app/routers/markets.py` and no `app/services/indicators.py` yet — check current
-  state before assuming it's wired up end to end.
+- **Scheduler leader** (`tasks/leader.py`): only one process runs jobs. It holds the
+  Postgres advisory lock `7400418` on a dedicated connection and pings it every 30 s,
+  starting the scheduler on acquire and stopping it on loss. Failover bounds: the leader
+  demotes within about 50 s of losing its connection (30 s interval + 2 x 10 s call
+  timeout, `tcp_user_timeout` 20 s) and the server frees the lock at about 60 s (session
+  keepalives), so the old leader always stops first. In-flight jobs can outlive demotion;
+  idempotency (the EOD unique index, `SKIP LOCKED` on notifications) covers it.
+  Non-Postgres URLs use an always-leader lock. Lock key registry (identical across the
+  platform, never reuse): `7400417` Navigator init/migrate, `7400418` Navigator scheduler
+  leader, `7400419` and `7400420` trender (see `app/locks.py`).
+- **APScheduler jobs** (`tasks/scheduler.py`, `build_scheduler()`; defaults `coalesce`,
+  `max_instances=1`, `misfire_grace_time=120`; every job is wrapped by a heartbeat that
+  writes `job_heartbeats` and is skipped when this process is not the leader):
+
+  | Job id (= heartbeat name) | Trigger | What it does |
+  |---|---|---|
+  | `scheduler_leader` | every 30 s (leader loop, not a job) | leader heartbeat |
+  | `quote_refresh` | every 15 min (`QUOTE_REFRESH_INTERVAL_MINUTES`) | quotes for held/alerted assets whose exchange is in session; writes the price snapshots that prove freshness |
+  | `price_alert_evaluation` | every 15 min (`ALERT_EVALUATION_INTERVAL_MINUTES`) | evaluates active alerts; sends Telegram notifications |
+  | `eod_snapshot` | 16:30 America/New_York, daily | EOD close per held asset; today's portfolio row only when every held, priceable, in-session asset has today's row (refreshes `fx_daily_rates` first) |
+  | `breadth_snapshot` | 17:00 America/New_York, daily | S5FI/S5TH into Redis (no expiry) |
+  | `eod_catchup` | 17:15 America/New_York, daily, and from `leader_startup` | fills missed EOD days from Yahoo daily bars, never overwriting (window: last row - 5 d, at least 30 d back, 183 d for new holdings; a 404 or `chart.error` is "no data", not a failure); then refreshes `fx_daily_rates` and writes portfolio rows (skipped while `portfolio_snapshots` is empty), and earlier missing portfolio days insert-only |
+  | `leader_startup` | once, 15 s after becoming leader | runs `eod_snapshot` (only if the US session is closed and its latest 16:30 slot was missed; writes only exchanges that are already closed), `eod_catchup`, `backfill_daily_snapshots_job` (refreshes `fx_daily_rates`; once, guarded by the `fx_history_rebuild` marker and only when every held currency has rate coverage, rebuilds `portfolio_snapshots` at each day's FX rate; otherwise fills it only if empty), `breadth_warm_start` in order |
+
+  `backfill_historical` no longer exists: `eod_catchup` and `leader_startup` replace it.
+- **EOD rules** (`services/eod.py`, `services/sessions.py`): EOD eligibility is separate
+  from alertability. An EOD row needs only a price, a usable timestamp and no error/stale/
+  `db_cache` (a fund or a Polygon/Finnhub bar still counts), while `is_alertable` also needs
+  a live source and a fresh market time. There is one EOD row per asset per trade day
+  (partial unique index `uq_price_snapshots_eod` on `(asset_id, trade_date)`); reruns keep
+  the earlier timestamp. `eod_backfill` rows are stamped at the session close (crypto 23:59:59
+  UTC). Funds (no live source) report `not_monitored` and are never alertable. Holidays are
+  not modelled; `old_market_time` is what they look like. `old_market_time` and `not_monitored`
+  are neutral (logged at INFO, outside the failure rule). Known gap: a feed that returns a
+  frozen `regularMarketTime` yields `old_market_time` (neutral) and pauses alerts silently;
+  the freshness check does not catch it.
+- **Health** (`routers/health.py`, `services/health.py`): `GET /health` is shallow
+  liveness (no DB). `GET /health/deep` returns `{"status": "ok|degraded|down", "checks":
+  {name: {"ok", "detail"}}}` covering db, migrations, scheduler leader, each job heartbeat,
+  alert delivery and price freshness for US/TASE/crypto. HTTP 200 for ok/degraded, 503 for
+  down (a critical check failed). Details are counts and ages only: no secrets, symbols or
+  quantities.
+- **Market indicators** are wired end to end: `GET /api/markets/indicators?keys=` ->
+  `routers/markets.py` -> `services/indicators.py` (`IndicatorsService`) -> providers
+  (`cnn.py`, `alternative_me.py`, Yahoo). Design doc:
+  `docs/superpowers/specs/2026-07-23-market-indicators-design.md`. Breadth (S5FI/S5TH) is
+  computed by the `breadth_snapshot` job into Redis. A failing indicator returns
+  `value: null` plus `error`, never a 500.
+- **Migrations**: new revisions go in `backend/alembic/versions/` with readable ids
+  (`0003`, ...). `python -m app.migrate` runs under advisory lock `7400417`: empty schema ->
+  `upgrade head`; legacy schema (tables but no `alembic_version`, i.e. old local DBs) ->
+  converge, verify, stamp `0001`, upgrade; it refuses and stamps nothing if verification
+  fails. The legacy-adopt path is for local/dev DBs only (production starts fresh at head).
+  Adding a value to a Postgres enum needs `op.get_context().autocommit_block()` around
+  `ALTER TYPE ... ADD VALUE`.
+- **Deploy**: Navigator sits behind the shared edge Caddy (zivalx-ops), which owns TLS and
+  basic auth. Navigator has neither; only `navigator-nginx` joins the external `edge`
+  network. `scripts/deploy.sh` takes a pre-deploy dump first (skipped on a first deploy).
 
 ## Tests
 
-Backend: ~200 tests in `backend/tests/`; run `pytest -q` from `backend/`. The Postgres
-enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_migration.py`
-(skipped otherwise). No frontend test setup was found.
+Backend: run `pytest -q` from `backend/` (SQLite, no services needed). Postgres tests are
+opt-in and skipped unless `TEST_POSTGRES_URL` is set: `test_pg_migrations.py`,
+`test_pg_leader.py`, `test_pg_notify.py`, `test_enum_migration.py`. Each test gets its own
+scratch schema. Use a throwaway container with a free port and remove it afterwards:
+```bash
+docker run -d --name nav-test-pg -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:15
+TEST_POSTGRES_URL=postgresql://postgres:test@localhost:55432/postgres \
+  .venv/bin/python -m pytest -q tests/test_pg_*.py tests/test_enum_migration.py
+docker rm -f nav-test-pg
+```
+No frontend test setup was found.
 
 ## Gotchas
 
@@ -123,18 +180,16 @@ enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_mig
   today's rate with a warning. Lot cost uses the purchase-date rate. The `fx_history_rebuild`
   marker records the one-time rebuild of the stored series.
 - **Yahoo yield tickers are ×10**: `^TNX` (US 10Y) and `^TYX` (US 30Y) come back from
-  Yahoo scaled by 10 — divide value and change by 10 to get the real percentage. This
-  isn't yet implemented anywhere in `providers/yahoo.py`; it's a documented requirement
-  for the indicators work, not existing behavior.
+  Yahoo scaled by 10. This is implemented in `services/indicators.py` (`"scale": 0.1`),
+  not in `providers/yahoo.py`.
 - **Yahoo minor units are normalized to major units** (ILA agorot, GBp/GBX pence, ZAc)
   at every Yahoo entry point via `services/currency_units.py` `normalize_quote_currency`.
   Quotes carry `unitFactor`; the quote cache key is `quote:v2:{SYMBOL}` (v2 so
   pre-normalization entries are ignored). Never price non-USD assets with USD-only fallbacks.
-- **Enum migration**: new currencies (ILS HKD CNY KRW TWD SGD INR SEK DKK NOK AUD CAD ZAR)
-  and region IL are added to Postgres enums by `_migrate_enum_values` in `init_db()`
-  (`ALTER TYPE ... ADD VALUE IF NOT EXISTS`). The whole Postgres init runs under a
-  `pg_advisory_lock` so concurrent workers don't race; it also writes the
-  `minor_units_cutover` marker into the `maintenance_runs` table.
+- **Enum values**: the currencies (ILS HKD CNY KRW TWD SGD INR SEK DKK NOK AUD CAD ZAR)
+  and region IL are part of the `0001` baseline (legacy DBs get them from the frozen
+  converge in `app/legacy_schema.py`). The `minor_units_cutover` marker in
+  `maintenance_runs` is written by the baseline on fresh DBs and by the converge on legacy ones.
 - **Cutover marker and paused alerts**: price alerts on minor-unit listings (or on stale
   quotes) created before the cutover are paused until the audit script's `--apply`
   writes `minor_unit_alerts_converted`. Holdings that can't be valued are flagged
@@ -154,8 +209,15 @@ enum-migration test is opt-in: `TEST_POSTGRES_URL=... pytest tests/test_enum_mig
   `POST /assets/` for stock/etf/fund derives currency/exchange/region from Yahoo (503 if
   unreachable, 422 unsupported currency). Spec: `docs/superpowers/specs/2026-11-17-tase-ils-support-design.md`.
 - Ports: backend 7000, frontend dev 7070 (not the 8000/5173 in the older docs).
-- No Alembic migrations are actually applied/initialized — schema comes from
-  `Base.metadata.create_all()`. If you add models, no migration step is needed locally.
-- `seed.py` populates sample assets/holdings; `seed_watchlists.py` separately seeds
+- Schema changes: add a revision under `backend/alembic/versions/` (see Migrations
+  above); editing a model alone changes nothing on Postgres. SQLite tests still use
+  `create_all()`.
+- `/health/deep` returns 503 only when a critical check is down; the ops watchdog polls it.
+  TASE close times in `services/sessions.py` (`_TASE_DAYS`) are unverified constants taken
+  from the design spec; check them against tase.co.il before relying on them.
+- Prod containers: `navigator-postgres`, `navigator-redis`, `navigator-api`,
+  `navigator-frontend`, `navigator-nginx`. Basic auth used to be in Navigator's nginx; it now
+  lives at the edge Caddy (zivalx-ops), and nginx has no `auth_basic`.
+- `seed.py` populates sample assets/holdings (run `python -m app.migrate` first); `seed_watchlists.py` separately seeds
   categorized watchlists (Energy, Metals, etc.) by calling the running API at
   `http://localhost:7000/api` — run it after the API is up, not standalone.

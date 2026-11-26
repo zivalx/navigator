@@ -47,18 +47,26 @@ Internet :443/:80
       │
       ▼
 ┌───────────────────────────────────────────────────────────┐
-│ nginx:1.25-alpine (SSL termination, rate limiting, gzip)   │
-│  - :80  → 301 redirect to https (except /.well-known/*)   │
-│  - :443 → TLS via Let's Encrypt (certbot shared volume)    │
-│  - /api/*  → proxy_pass http://api:7000                   │
-│  - /health → proxy_pass http://api:7000 (no rate limit)   │
-│  - /*      → static SPA files from shared "frontend_build"│
+│ edge Caddy (zivalx-ops, outside this repo)                 │
+│  - terminates TLS (automatic certificates)                 │
+│  - basic auth (Navigator has no auth of its own)           │
+│  - reverse proxies to navigator-nginx:80                   │
+└───────────────────────────┬───────────────────────────────┘
+                            │ external docker network `edge`
+                            ▼
+┌───────────────────────────────────────────────────────────┐
+│ navigator-nginx (nginx:1.25-alpine) - joins `edge`, NO     │
+│ published ports                                            │
+│  - plain HTTP :80, rate limiting, gzip                     │
+│  - /api/*  → proxy_pass http://navigator-api:7000          │
+│  - /health, /health/deep → navigator-api (no rate limit)   │
+│  - /*      → static SPA files from shared "frontend_build" │
 │              volume, try_files → index.html                │
 └───────┬───────────────────────────────┬────────────────────┘
         │                               │
         ▼                               ▼
 ┌────────────────────┐         ┌────────────────────────┐
-│ frontend (build     │         │ api                     │
+│ frontend (build     │         │ navigator-api           │
 │ container, runs      │         │ Dockerfile.prod:        │
 │ once, exits)         │         │ gunicorn + 2 uvicorn     │
 │ outputs static build │         │ workers, :7000           │
@@ -67,24 +75,23 @@ Internet :443/:80
                                           ▼        ▼
                                ┌──────────────┐ ┌──────────────┐
                                │ postgres:15   │ │ redis:7       │
-                               │ (internal net)│ │ (password-    │
-                               │               │ │ protected,    │
-                               │               │ │ internal net) │
+                               │ (navigator-net│ │ (password-    │
+                               │  only)        │ │ protected,    │
+                               │               │ │ navigator-net)│
                                └──────────────┘ └──────────────┘
-
-certbot container shares the /etc/letsencrypt and webroot volumes with
-nginx and renews certs on a 12h sleep loop (docker-compose.prod.yml).
 ```
+
+There is no certbot and no TLS inside this repo: certificates and basic auth belong to the edge Caddy.
 
 Notes on production topology:
 - `postgres` and `redis` publish **no host ports** in prod compose — only reachable from other containers on the `navigator-net` bridge network. In dev compose, `db`/`redis` do publish `5432`/`6379` to the host.
 - `redis` in prod requires a password (`--requirepass ${REDIS_PASSWORD}`); dev Redis has no password.
-- The `api` container's healthcheck hits `/health` (`backend/app/main.py` defines this route trivially, returning `{"status": "ok"}`).
-- nginx config lives at `nginx/nginx.conf` (main config, not read in detail here) and `nginx/conf.d/default.conf.template`, which is `envsubst`'d for `${DOMAIN}` at container start (see the nginx service `command:` in `docker-compose.prod.yml`).
+- The `api` container's healthcheck hits `/health` (`backend/app/routers/health.py`; shallow, no DB). `GET /health/deep` returns `{"status","checks"}` (200 for ok/degraded, 503 for down) and is polled by the ops watchdog.
+- nginx config lives at `nginx/nginx.conf` (main config) and `nginx/conf.d/default.conf`, mounted read-only. It trusts `X-Forwarded-For` only from the edge network (`set_real_ip_from 10.250.0.0/24`) and proxies to the container name `navigator-api` through Docker DNS (`resolver 127.0.0.11`, variable `proxy_pass`).
 
 ## 2. Data Model
 
-Source: `backend/app/models/*.py`, wired together in `backend/app/models/__init__.py`. ORM is SQLAlchemy; `Base.metadata.create_all()` is called from `backend/app/database.py:init_db()` at every app startup (see §6, "Migrations" caveat — there are no actual Alembic migrations in the repo despite `alembic` being a dependency).
+Source: `backend/app/models/*.py`, wired together in `backend/app/models/__init__.py`. ORM is SQLAlchemy; Alembic owns the Postgres schema (`backend/alembic/versions`, applied by `python -m app.migrate`, which the container entrypoint runs before the app starts). `init_db()` does no DDL on Postgres; it only checks the DB is at the code's head. SQLite (tests) still uses `Base.metadata.create_all()`.
 
 ### ASCII ERD
 
@@ -154,7 +161,7 @@ Table-by-table (file: `backend/app/models/…`):
 | `price_snapshots` (`price.py`) | `id` (PK), `asset_id` (FK → assets, CASCADE), `price`, `currency` (enum), `timestamp` (indexed, and composite index `(asset_id, timestamp)`), `source` (free-text tag: `"yahoo"`, `"polygon"`, `"finnhub"`, `"coingecko"`, `"db_cache"`, `"eod_snapshot"`, `"eod_backfill"`) | N→1 `assets`. This table is the append-only time series used for both live-quote caching-to-DB and EOD/backfill history — see §3. |
 | `fx_rates` (`price.py`) | `id` (PK), `base_currency` (enum), `quote_currency` (enum), `rate`, `timestamp` (server default now), composite index `(base_currency, quote_currency)` | No FK — pure lookup/history table, also append-only |
 | `news_items` (`news.py`) | `id` (PK), `asset_id` (FK → assets, `ON DELETE SET NULL` — news can outlive its asset link), `title`, `summary` (Text), `url` (unique), `publisher`, `published_at` (indexed; plus composite `(asset_id, published_at)`), `sentiment_score` (−1..1), `relevance_score` (0..1) | N→1 `assets`, nullable |
-| `price_alerts` (`alert.py`, new) | `id` (PK), `asset_id` (FK → assets, CASCADE, indexed), `rule` (enum `price_below`/`price_above`), `threshold`, `note`, `is_active` (default true), `created_at`, `triggered_at`, `triggered_price`, `acknowledged_at`; composite index `(asset_id, is_active)` | N→1 `assets` (one-sided relationship — `Asset` intentionally declares no back-reference). Evaluated every 5 minutes by the scheduler (§5); a triggered alert flips `is_active=False` and records `triggered_at`/`triggered_price`. |
+| `price_alerts` (`alert.py`, new) | `id` (PK), `asset_id` (FK → assets, CASCADE, indexed), `rule` (enum `price_below`/`price_above`), `threshold`, `note`, `is_active` (default true), `created_at`, `triggered_at`, `triggered_price`, `acknowledged_at`; composite index `(asset_id, is_active)` | N→1 `assets` (one-sided relationship — `Asset` intentionally declares no back-reference). Evaluated every 15 minutes by the scheduler (§5); a triggered alert flips `is_active=False` and records `triggered_at`/`triggered_price`. |
 
 Everything uses string primary keys populated with `str(uuid.uuid4())` at insert time in the service/router layer (SQLAlchemy models don't auto-generate IDs; e.g. `backend/app/services/portfolio.py`, `market_data.py`, `fx.py`, `tasks/scheduler.py` all call `uuid.uuid4()` explicitly).
 
@@ -257,21 +264,16 @@ Read endpoints are cached in Redis for `news_cache_ttl` (default 900s) at the ro
 
 ## 5. Scheduler Jobs (`backend/app/tasks/scheduler.py`)
 
-An `AsyncIOScheduler` (APScheduler) is started/stopped in the FastAPI `lifespan` (`backend/app/main.py`: `start_scheduler()` on startup, `shutdown_scheduler()` on shutdown). Five jobs are registered in `start_scheduler()`:
+An `AsyncIOScheduler` (APScheduler) is built by `build_scheduler()` and started by the scheduler leader (`backend/app/tasks/leader.py`, wired in the FastAPI `lifespan`). Only the process holding Postgres advisory lock `7400418` runs jobs; it pings the lock every 30 s, demotes within about 50 s of losing its connection and the server frees the lock at about 60 s. `SCHEDULER_ENABLED=false` skips the leader loop entirely. Defaults: `coalesce`, `max_instances=1`, `misfire_grace_time=120`. Every job is wrapped by a heartbeat (`tasks/heartbeat.py`) that writes `job_heartbeats`, which `/health/deep` reads. Lock keys: `7400417` migrate, `7400418` scheduler leader, `7400419`/`7400420` trender.
 
-1. **`eod_snapshot`** — "EOD Price Snapshot", cron job at `16:30` `US/Eastern`, every day. Runs `snapshot_eod_prices()`:
-   - Gets the distinct set of `asset_id`s across all `holding_lots`.
-   - For each, fetches a live quote via `MarketDataService.get_quote` and inserts a `PriceSnapshot` with `source="eod_snapshot"`, `timestamp=now(UTC)`.
-   - Per-asset failures are caught, rolled back, and logged; job continues for remaining assets and logs a final success/failure count.
-2. **`breadth_snapshot`** — "Market Breadth Computation (S5FI/S5TH)", cron job at `17:00` `US/Eastern` (shortly after the EOD snapshot). Runs `services/breadth.py:compute_and_store_breadth()` — computes the % of S&P 500 constituents above their 50-day/200-day SMAs and stores the values in Redis **without expiry** (overwritten daily).
-3. **`backfill_historical`** — "Historical Price Backfill", a one-shot `date` job scheduled for `now(UTC) + 15s` at every process startup (not cron — re-registered, and thus re-run, on every app restart). Runs `backfill_historical_prices()`:
-   - Guard: counts existing `price_snapshots` rows where `source == "eod_snapshot"`; if `>= 5`, skips entirely (logged). This means the backfill only ever does real work in the first few days of a fresh deployment, or if EOD snapshots have been failing.
-   - Otherwise, for each held asset, calls the Yahoo Finance chart endpoint directly via `httpx` (`https://query1.finance.yahoo.com/v8/finance/chart/{symbol}`, `range=6mo`, `interval=1d`, with a spoofed desktop `User-Agent`) and bulk-inserts one `PriceSnapshot` per daily close with `source="eod_backfill"`.
-   - Per-asset failures are caught/rolled back/logged; does not use `MarketDataService` or its provider fallback — this is Yahoo-only, hardcoded.
-4. **`breadth_warm_start`** — one-shot `date` job at `now(UTC) + 30s` after startup. Runs `breadth.ensure_breadth_warm()` — kicks off the (network-heavy, minutes-long) breadth computation only if the Redis cache is cold; a no-op otherwise.
-5. **`price_alert_evaluation`** — "Price Alert Evaluation", `interval` job every **5 minutes**. Runs `evaluate_price_alerts()`:
-   - Loads all `price_alerts` rows with `is_active=True`, batch-fetches quotes for their distinct symbols (riding the 60s quote cache).
-   - Triggers alerts whose rule condition is met (boundary-inclusive: `price <= threshold` for `price_below`, `price >= threshold` for `price_above`), setting `is_active=False` and recording `triggered_at`/`triggered_price`. Triggered alerts don't fire again unless reactivated via the alerts API.
+1. **`quote_refresh`** — every 15 minutes (setting `quote_refresh_interval_minutes`, env `QUOTE_REFRESH_INTERVAL_MINUTES`; this is not a real-time system). Its health threshold is 3 x the interval. Fetches quotes for held assets and assets with an active alert whose exchange is in session (crypto always); the quote path writes the price snapshots that serve as the freshness signal.
+2. **`price_alert_evaluation`** — every 15 minutes (setting `alert_evaluation_interval_minutes`, env `ALERT_EVALUATION_INTERVAL_MINUTES`); health threshold 3 x the interval. Runs `evaluate_price_alerts()`: loads active `price_alerts`, batch-fetches quotes for their symbols, and triggers alerts whose condition is met (boundary-inclusive: `price <= threshold` for `price_below`, `price >= threshold` for `price_above`), setting `is_active=False` and recording `triggered_at`/`triggered_price`. Only alertable quotes count (live source, fresh market time; see `services/sessions.py`). Notifications go out via Telegram.
+3. **`eod_snapshot`** — cron `16:30` `America/New_York`, daily. Runs `snapshot_eod_prices()`: one EOD `PriceSnapshot` (`source="eod_snapshot"`) per held asset, stamped with the quote's market time and its `trade_date`. EOD rows are unique per asset per trade date (`uq_price_snapshots_eod`). Per-asset failures are logged and the job continues.
+4. **`breadth_snapshot`** — cron `17:00` `America/New_York`, daily. Runs `services/breadth.py:compute_and_store_breadth()` — computes the % of S&P 500 constituents above their 50-day/200-day SMAs and stores the values in Redis **without expiry** (overwritten daily).
+5. **`eod_catchup`** — cron `17:15` `America/New_York`, daily, and also run by `leader_startup`. Fills missed EOD days from Yahoo daily bars (`source="eod_backfill"`, stamped at the session close, never overwriting an existing row), then the portfolio snapshot rows they enable. This replaces the old `backfill_historical` job.
+6. **`leader_startup`** — one-shot `date` job 15 s after the process becomes leader. Runs, in order, `eod_snapshot` (only when its 16:30 slot was missed and the US session is closed; this startup run writes only assets whose own exchange is already closed, with a quote from at or after that close), `eod_catchup`, `backfill_daily_snapshots_job` (only if `portfolio_snapshots` is empty) and `breadth_warm_start` (`breadth.ensure_breadth_warm()`, a no-op unless the Redis cache is cold).
+
+The leader loop itself heartbeats as `scheduler_leader` every 30 s.
 
 No news-sync or FX-refresh cron exists — news sync remains manual-only (`POST /api/news/sync`).
 
@@ -281,7 +283,7 @@ No news-sync or FX-refresh cron exists — news sync remains manual-only (`POST 
 backend/app/
 ├── main.py            FastAPI app, lifespan (DB init, Redis connect, scheduler), CORS, routers
 ├── config.py           Settings (pydantic-settings, reads .env)
-├── database.py         SQLAlchemy engine/session/Base, init_db() = create_all() (no Alembic runtime use)
+├── database.py         SQLAlchemy engine/session/Base, init_db() = SQLite create_all / Postgres revision check (Alembic owns the schema)
 ├── cache.py             Redis async wrapper (get/set/delete/exists, JSON de/serialize)
 ├── models/              asset.py, holding.py, watchlist.py, price.py, news.py, alert.py  (see §2)
 ├── schemas/             Pydantic request/response models (holding.py, portfolio.py, asset.py, ...)
@@ -290,7 +292,7 @@ backend/app/
 │                         alphavantage.py, cnn.py, alternative_me.py
 ├── routers/              assets.py, portfolio.py, watchlist.py, markets.py, news.py, alerts.py
 ├── data/                 sp500_constituents fallback list (breadth computation)
-└── tasks/                scheduler.py (APScheduler jobs)
+└── tasks/                scheduler.py (APScheduler jobs), leader.py (leader election), heartbeat.py
 
 backend/tests/            pytest suite (indicators providers/service/endpoint, breadth,
                           alerts, portfolio base-currency and history)
@@ -304,7 +306,6 @@ The market-indicators feature from `docs/superpowers/specs/2026-07-23-market-ind
 - **Fixed during this pass**: `market_data.py`'s last-resort DB lookup used to query `PriceSnapshot.asset_id == symbol` (UUID vs. ticker mismatch — the fallback could never match a row). It now resolves through the asset row (`asset.id`); verified by the full test suite (60 passed).
 - **Alpha Vantage key is unused for quotes**, only for the movers endpoint, despite being grouped under "Market Data" API keys generally.
 - **`anthropic_api_key` / `openai_api_key`** are defined in `config.py` and listed in `requirements.txt` (`anthropic==0.42.0`, `openai==1.59.5`) but a repo-wide grep found **no code that imports or calls either SDK** — these are currently unused, reserved for a future AI feature.
-- **Alembic is a listed dependency and `scripts/deploy.sh`'s spec calls `alembic upgrade head`**, but there is no `alembic/` migrations directory in `backend/`, and `database.py` uses `Base.metadata.create_all()` at every startup instead. Schema changes today rely on `create_all()` (additive only — it won't alter existing tables), not real migrations.
+- **Migrations**: Alembic owns the schema. Local non-Docker dev must run `python -m app.migrate` first (also before `seed.py`); old local DBs without `alembic_version` are adopted automatically.
 - **News sync has no scheduler job** — syncing is fully manual via `POST /api/news/sync`, and entirely inert without `MARKETAUX_API_KEY`. (The previously-dead `news_cache_ttl` config is now wired into the news read endpoints — fixed during this pass, see §4.4.)
-- **Backfill job re-runs its 15-second-after-startup schedule on every process restart**, but its internal `>=5 eod_snapshot rows` guard makes repeated runs cheap no-ops once real EOD history accumulates.
 - **Breadth values live only in Redis (no expiry)** — a Redis flush loses the s5fi/s5th history point used for day-over-day change until the next 17:00 ET job (the startup warm job re-computes if cold).

@@ -12,7 +12,7 @@ The frontend (`frontend/`) was checked for `import.meta.env` / `VITE_*` usage vi
 | Variable | Required? | Default (in code) | What breaks or degrades without it |
 |---|---|---|---|
 | `APP_ENV` | Optional | `development` | Controls `database.py`'s SQLAlchemy `echo` flag (SQL logging on in `development`) and is set to `production` explicitly by `docker-compose.prod.yml`. Nothing else keys off it in the reviewed code. |
-| `SECRET_KEY` | Optional (but should be set in prod) | `dev-secret-key-change-in-production` | Declared but **no code path in the reviewed backend reads `settings.secret_key`** (no JWT/session signing found) — currently a placeholder for future auth (`python-jose`/`passlib` are in `requirements.txt` but unused). Leaving the default is a no-op today, not a live security hole, but should still be changed before any auth work lands. |
+| `SECRET_KEY` | Optional (but should be set in prod) | `dev-secret-key-change-in-production` | Declared but **no code path in the reviewed backend reads `settings.secret_key`** (no JWT/session signing found) — currently a placeholder for future auth (no auth libraries are in `requirements.txt` yet; `python-jose` was removed as unused). Leaving the default is a no-op today, not a live security hole, but should still be changed before any auth work lands. |
 | `CORS_ORIGINS` | Optional | `http://localhost:5173,http://localhost:7070,http://localhost:3000,http://localhost:3002` | Comma-separated list parsed by `cors_origins_list`; feeds `CORSMiddleware.allow_origins` in `main.py`. Without the right origin listed, the browser SPA gets CORS errors calling the API cross-origin (not an issue when nginx same-origin-proxies in prod). |
 | `DATABASE_URL` | **Effectively required** | `postgresql://postgres:postgres@localhost:5432/navigator` | If Postgres isn't reachable at this URL, `init_db()` (`database.py`, called at startup in `main.py`'s lifespan) fails and the app won't start. Docker compose files override this to point at the `db`/`postgres` service names. |
 | `REDIS_URL` | **Effectively required** | `redis://localhost:6379/0` | `cache.connect()` is awaited at startup (`main.py`); if Redis is unreachable this raises at startup. Even if it didn't, every quote/FX/movers cache lookup would fail — `Cache.get`/`set` guard on `self.redis` being set, but `connect()` itself isn't guarded, so an unreachable Redis is a hard startup failure, not a soft degrade. |
@@ -37,8 +37,6 @@ These aren't read by `config.py` directly but are required by the compose files 
 |---|---|---|
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `docker-compose.prod.yml` | Postgres container credentials; also interpolated into the `DATABASE_URL` the compose file passes to `api`. |
 | `REDIS_PASSWORD` | `docker-compose.prod.yml` | Redis `--requirepass`; interpolated into `REDIS_URL` for `api`. Dev compose (`backend/docker-compose.yml`) has no Redis password. |
-| `DOMAIN` | `docker-compose.prod.yml`, `nginx/conf.d/default.conf.template` | `envsubst`'d into the nginx server config for TLS server_name / cert paths. |
-| `CERTBOT_EMAIL` | `.env.prod.example` (referenced by `scripts/init-letsencrypt.sh`, not read in detail here) | Let's Encrypt registration contact. |
 
 ## Discrepancies between the two `.env*.example` files and `config.py`
 

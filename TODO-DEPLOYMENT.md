@@ -17,11 +17,11 @@
 >    hitting the VPS IP directly bypasses Cloudflare. Firewall the origin to
 >    Cloudflare IP ranges (ufw) or use a `cloudflared` tunnel with no public
 >    80/443, and/or add an app/nginx-level shared-secret.
-> 3. **`alembic upgrade head` (step 5.x below) will fail — no migrations
->    exist.** Schema currently comes from `create_all()` + the on-boot DDL in
->    `database.py`. Either introduce real Alembic migrations or drop that
->    deploy step; do not run the on-boot DDL under multiple gunicorn workers
->    racing the same schema change.
+> 3. **Migrations are real now.** Alembic owns the schema and the api entrypoint
+>    runs `python -m app.migrate` under advisory lock `7400417`; `deploy.sh` takes a
+>    pre-deploy dump first. Nothing to do by hand. TLS, basic auth and the public
+>    listener moved to the shared edge Caddy: follow the zivalx-ops runbook
+>    (`zivalx-ops/docs/2026-11-22-ops-design.md`).
 > 4. **Never run `backend/docker-compose.yml` (dev) on the server** — it
 >    exposes Postgres/Redis on host ports without real credentials. Use
 >    `docker-compose.prod.yml` only.
@@ -69,7 +69,6 @@ A production-ready compose file (separate from the dev one) with:
 ### 1.4 nginx Configuration
 
 - [ ] Reverse proxy: `/` serves frontend static files, `/api` proxies to backend:8000
-- [ ] SSL with Let's Encrypt (certbot or Cloudflare origin certs)
 - [ ] Gzip compression
 - [ ] Security headers (X-Frame-Options, CSP, HSTS)
 - [ ] Rate limiting at nginx level
@@ -88,7 +87,6 @@ A production-ready compose file (separate from the dev one) with:
 ### 2.2 Install Dependencies
 
 - [ ] Docker + Docker Compose
-- [ ] Certbot (if not using Cloudflare for SSL)
 
 ### 2.3 Deploy
 
@@ -110,48 +108,22 @@ A production-ready compose file (separate from the dev one) with:
 
 ### 3.2 SSL
 
-Two options (pick one):
-- [ ] **Option A: Cloudflare Origin Cert** — generate in Cloudflare, install in nginx (simplest)
-- [ ] **Option B: Let's Encrypt** — certbot with auto-renewal cron
+**Moved to zivalx-ops.** The shared edge Caddy terminates TLS (certificates and
+renewal included) for `navigator.zivalx.com`. Navigator has no certbot, no port
+80/443 and no HSTS of its own. See the zivalx-ops runbook
+(`zivalx-ops/docs/2026-11-22-ops-design.md`).
 
 ### 3.3 Password Protection
 
-**Implemented: nginx HTTP Basic Auth** — a single login gate in the nginx
-reverse proxy covers BOTH the frontend and `/api` (the backend has no auth of
-its own). It is self-protecting: because the check runs on the origin, even a
-direct `https://<vps-ip>/` hit needs the password, so it does not depend on a
-separate firewall to be safe. `/health` is intentionally exempt for probes.
+**Moved to zivalx-ops.** HTTP Basic Auth is enforced at the edge Caddy, which
+proxies to `navigator-nginx:80` over the external `edge` Docker network.
+Navigator's nginx has no `auth_basic` and no `.htpasswd`; `X-Export-Token` still
+guards `/api/export/*`. Only the edge Caddy and trender's app may be attached to
+`edge`. Credential rotation and the firewall are in the zivalx-ops runbook
+(`zivalx-ops/docs/2026-11-22-ops-design.md`).
 
-Deploy steps (run on the VPS, in the repo dir, BEFORE `docker compose up`):
-
-```bash
-# 1. Create the credential file the nginx container mounts. -B = bcrypt.
-#    (apache2-utils provides htpasswd: `apt-get install -y apache2-utils`)
-htpasswd -B -c nginx/.htpasswd ziv        # prompts for a password
-#    add more users later WITHOUT -c:  htpasswd -B nginx/.htpasswd alice
-
-# 2. Confirm it exists and is a FILE (a missing file makes Docker mount a
-#    directory and nginx fails to start):
-test -f nginx/.htpasswd && echo ok
-
-# 3. Bring the stack up. IMPORTANT: pass --env-file .env.prod — the compose
-#    file interpolates ${DOMAIN}/${POSTGRES_*}/${REDIS_PASSWORD} from it, and
-#    compose only auto-loads a file literally named ".env", not ".env.prod".
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
-```
-
-> Use `--env-file .env.prod` for EVERY `docker compose ... -f docker-compose.prod.yml`
-> command (up, build, restart, logs). Without it, `${DOMAIN}` renders empty and
-> nginx fails to start.
-
-`nginx/.htpasswd` is gitignored — never commit it. To rotate, re-run
-`htpasswd -B nginx/.htpasswd ziv` and `docker compose restart nginx`.
-
-Also close the origin at the firewall so only 443 (+80 for ACME) is public:
-
-```bash
-ufw default deny incoming && ufw allow OpenSSH && ufw allow 80 && ufw allow 443 && ufw enable
-```
+Deploy with `./scripts/deploy.sh` (needs `.env.prod` with `POSTGRES_DB=navigator`
+and the `edge` network created by ops).
 
 **Optional upgrade — Cloudflare Tunnel + Access (nicer login, no open ports):**
 Run a `cloudflared` container that dials out to Cloudflare (so 80/443 can be

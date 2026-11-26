@@ -36,6 +36,25 @@ class YahooFinanceProvider(BaseProvider):
         "SHOP", "UBER", "ABNB", "RIVN", "LCID", "SOFI", "HOOD", "RBLX",
     ]
 
+    # Tel Aviv large caps (TA-35 names) scanned for region=IL movers.
+    # Yahoo quotes these in agorot (ILA); get_quote normalizes to ILS.
+    IL_MOVER_NAMES = {
+        "LUMI.TA": "Bank Leumi", "POLI.TA": "Bank Hapoalim",
+        "DSCT.TA": "Israel Discount Bank", "MZTF.TA": "Mizrahi Tefahot",
+        "FIBI.TA": "First International Bank", "TEVA.TA": "Teva",
+        "NICE.TA": "NICE", "ESLT.TA": "Elbit Systems", "ICL.TA": "ICL Group",
+        "BEZQ.TA": "Bezeq", "AZRG.TA": "Azrieli Group", "ALHE.TA": "Alony Hetz",
+        "MLSR.TA": "Melisron", "BIG.TA": "BIG Shopping Centers",
+        "AMOT.TA": "Amot Investments", "HARL.TA": "Harel Insurance",
+        "PHOE.TA": "Phoenix Financial", "CLIS.TA": "Clal Insurance",
+        "MGDL.TA": "Migdal Insurance", "DLEKG.TA": "Delek Group",
+        "NWMD.TA": "NewMed Energy", "ENLT.TA": "Enlight Renewable",
+        "ORA.TA": "Ormat", "TSEM.TA": "Tower Semiconductor", "NVMI.TA": "Nova",
+        "CAMT.TA": "Camtek", "SPEN.TA": "Shapir Engineering",
+        "OPCE.TA": "OPC Energy", "STRS.TA": "Strauss Group",
+        "SAE.TA": "Shufersal", "ENOG.TA": "Energean", "NXSN.TA": "Next Vision",
+    }
+
     def supports_symbol(self, symbol: str, asset_type: str = "stock") -> bool:
         """Yahoo supports stocks, ETFs, indices — everything except crypto (use CoinGecko)."""
         return asset_type in ("stock", "etf", "index", "fund")
@@ -66,12 +85,21 @@ class YahooFinanceProvider(BaseProvider):
             price = round(price * factor, 6)
             change = round(raw_change * factor, 6)
 
+        rmt = meta.get("regularMarketTime")
+        market_time = (
+            datetime.fromtimestamp(rmt, tz=timezone.utc).isoformat()
+            if isinstance(rmt, (int, float)) and rmt
+            else None
+        )
+
         return {
             "symbol": symbol.upper(),
             "price": price,
             "change": change,
             "changePercent": change_pct,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "marketTime": market_time,
+            "exchangeTimezone": meta.get("exchangeTimezoneName"),
             "currency": currency,
             "unitFactor": factor,
             "exchange": meta.get("fullExchangeName", meta.get("exchangeName", "")),
@@ -210,6 +238,21 @@ class YahooFinanceProvider(BaseProvider):
 
         return movers[:limit]
 
+    async def get_il_movers(self, limit: int = 10) -> Dict[str, List[Dict]]:
+        """Tel Aviv gainers and losers from one pass over IL_MOVER_NAMES.
+
+        Prices are ILS major units (agorot normalized by get_quote). Only
+        names that actually moved are listed on each side.
+        """
+        quotes = await self.get_quotes(list(self.IL_MOVER_NAMES))
+        movers = []
+        for symbol, quote in quotes.items():
+            movers.append({**quote, "name": self.IL_MOVER_NAMES.get(symbol, symbol)})
+        movers.sort(key=lambda q: q.get("changePercent") or 0, reverse=True)
+        gainers = [q for q in movers if (q.get("changePercent") or 0) > 0]
+        losers = [q for q in reversed(movers) if (q.get("changePercent") or 0) < 0]
+        return {"gainers": gainers[:limit], "losers": losers[:limit]}
+
     async def search(self, query: str, limit: int = 10) -> List[Dict]:
         """Search for assets by name or symbol."""
         params = {
@@ -243,6 +286,8 @@ class YahooFinanceProvider(BaseProvider):
                 "symbol": quote.get("symbol", ""),
                 "name": quote.get("shortname") or quote.get("longname", ""),
                 "exchange": quote.get("exchange", ""),
+                # Yahoo's display name for the venue ("NYSE", "Tel Aviv").
+                "exchange_name": quote.get("exchDisp"),
                 "asset_type": asset_type,
                 # Search hits carry no currency; never invent one (the
                 # quote / asset record is the source of truth).

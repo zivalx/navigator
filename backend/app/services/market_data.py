@@ -70,9 +70,18 @@ class MarketDataService:
                 provider_used = "coingecko"
             except Exception as e:
                 errors.append(f"CoinGecko: {redact_secrets(e)}")
+            if not quote:
+                # Yahoo crypto pair; the quote keeps the caller's symbol.
+                yahoo_symbol = symbol.upper() if "-" in symbol else f"{symbol.upper()}-USD"
+                try:
+                    quote = await self.yahoo.get_quote(yahoo_symbol)
+                    quote["symbol"] = symbol.upper()
+                    provider_used = "yahoo"
+                except Exception as e:
+                    errors.append(f"Yahoo: {redact_secrets(e)}")
 
-        # For stocks/ETFs: Yahoo first (free, always available)
-        if not quote and asset_type in ["stock", "etf"]:
+        # For stocks/ETFs/indices: Yahoo first (free, always available)
+        if not quote and asset_type in ["stock", "etf", "index"]:
             try:
                 quote = await self.yahoo.get_quote(symbol)
                 provider_used = "yahoo"
@@ -177,7 +186,7 @@ class MarketDataService:
             self.db.commit()
         except Exception as exc:
             # Don't fail if we can't store - just skip
-            logger.warning("could not store price snapshot for %s: %s", symbol, exc)
+            logger.warning("could not store price snapshot for %s: %s", symbol, redact_secrets(exc))
             self.db.rollback()
 
     async def _fetch_and_cache_movers(self) -> None:
@@ -220,25 +229,44 @@ class MarketDataService:
 
         logger.warning("ALL PROVIDERS FAILED [movers]: no data available")
 
-    async def _get_movers(self, direction: str, limit: int) -> List[Dict]:
-        """Get movers from cache, fetching if needed."""
-        cache_key = f"movers:{direction}"
+    async def _fetch_and_cache_il_movers(self) -> None:
+        """Tel Aviv movers. Yahoo only: Alpha Vantage and Polygon movers are
+        US-market lists priced in USD."""
+        try:
+            both = await self.yahoo.get_il_movers(20)
+        except Exception as e:
+            logger.warning("ALL PROVIDERS FAILED [movers:IL]: Yahoo failed (%s)", redact_secrets(e))
+            return
+        for direction in ("gainers", "losers"):
+            await cache.set(f"movers:IL:{direction}", both[direction], ttl=1800)
+
+    async def _get_movers(self, direction: str, limit: int, region: Optional[str] = "US") -> List[Dict]:
+        """Get movers from cache, fetching if needed.
+
+        region=IL scans Tel Aviv large caps; any other region keeps the
+        US-market providers (cache keys unchanged for them).
+        """
+        is_il = (region or "").upper() == "IL"
+        cache_key = f"movers:IL:{direction}" if is_il else f"movers:{direction}"
         cached = await cache.get(cache_key)
-        if cached:
+        if cached is not None and (cached or is_il):
             return cached[:limit]
 
-        await self._fetch_and_cache_movers()
+        if is_il:
+            await self._fetch_and_cache_il_movers()
+        else:
+            await self._fetch_and_cache_movers()
 
         cached = await cache.get(cache_key)
         return cached[:limit] if cached else []
 
     async def get_top_gainers(self, limit: int = 10, region: str = "US") -> List[Dict]:
         """Get top gaining stocks from live providers."""
-        return await self._get_movers("gainers", limit)
+        return await self._get_movers("gainers", limit, region)
 
     async def get_top_losers(self, limit: int = 10, region: str = "US") -> List[Dict]:
         """Get top losing stocks from live providers."""
-        return await self._get_movers("losers", limit)
+        return await self._get_movers("losers", limit, region)
 
     async def get_historical_changes(self, symbol: str) -> Dict:
         """Get 1d, 1mo, 6mo change % for a symbol via Yahoo."""
